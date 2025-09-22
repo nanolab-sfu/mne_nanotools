@@ -1,0 +1,8 @@
+# Caches
+__pycache__/
+.ipynb_checkpoints/
+*.log
+
+# Archivos de sistema
+.DS_Store
+Thumbs.db
