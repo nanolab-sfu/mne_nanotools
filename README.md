@@ -1,1 +1,0 @@
-echo # mne_nanotools
