@@ -255,7 +255,7 @@ def preprocess_subject(
     #       SOURCE MODELING (BEM / SRC / FORWARD / INVERSE)
     # ======================================================
     trans_path = os.path.join(meg_dir, f"{subject}-trans_corr.fif")
-    bem_path = os.path.join(fs_dir, "bem", f"{subject}-5120-5120-5120-bem-sol.fif")
+    bem_path = os.path.join(fs_dir, subject, "bem", f"{subject}-5120-5120-5120-bem-sol.fif")
     bem_dir = os.path.join(fs_dir, "bem")
     src_path = os.path.join(deriv_dir, "src.fif")
 
