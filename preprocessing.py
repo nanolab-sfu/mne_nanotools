@@ -2,10 +2,36 @@ import mne
 
 
 def read_data(fname):
-    # Read in MEG data in fif format
-    raw = mne.io.read_raw_fif(fname, preload=True)  # Need to preload to filter
-    # Fix channel labelling (may not be necessary depending on system,
-    # only has small effect anyways according to MNE-Python documentation)
+    """
+    Read MEG data in either .fif or .ds format.
+    
+    Parameters
+    ----------
+    fname : str
+        Path to the MEG file (.fif or .ds directory).
+    
+    Returns
+    -------
+    raw : mne.io.Raw
+        The loaded MNE Raw object.
+    """
+    import os
+    import mne
+
+    if not os.path.exists(fname):
+        raise FileNotFoundError(f"File not found: {fname}")
+
+    # Detect file type
+    if fname.endswith('.fif'):
+        print(f"→ Reading FIF file: {fname}")
+        raw = mne.io.read_raw_fif(fname, preload=True)
+    elif fname.endswith('.ds') and os.path.isdir(fname):
+        print(f"→ Reading CTF/MEGIN .ds directory: {fname}")
+        raw = mne.io.read_raw_ctf(fname, system_clock='ignore', preload=True)
+    else:
+        raise ValueError(f"Unsupported file type: {fname}. Expected .fif or .ds")
+
+    # Fix coil types (recommended by MNE)
     mne.channels.fix_mag_coil_types(raw.info)
     return raw
 
