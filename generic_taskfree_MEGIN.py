@@ -5,7 +5,7 @@
 """
 Generic task-free MEGIN preprocessing with ERM-SSP, tSSS, QC report, and bandwise source PSDs.
 
-Version 0.1.0 - Last modified 11/11/2025
+Version 0.1.0 - Last modified 15/11/2025
 
 Example:
     python generic_taskfree_MEGIN.py \
@@ -38,7 +38,9 @@ from nanotools import preprocessing, postprocessing
 def preprocess_subject(
     root_dir: str,
     subject_id: str,
-    rest_basename: str = "{sub}_rest1_raw.fif",
+    session:None,
+    resting = 'rest1',
+    rest_basename: str = "{sub}_{rest}_raw.fif",
     erm_basename: str = "{sub}_erm_raw.fif",
     tsss_dir: str = "/Users/isaant/Documents/PosDoc/Projects/tsss_params/2023",
     st_duration: float = 10.0,
@@ -48,7 +50,7 @@ def preprocess_subject(
     line_freqs: tuple = (60, 120, 180),
     downsample: int = 500,
     crop_tmin: tuple = (0., 30.),
-    crop_tmax: tuple = (300., 420.),
+    crop_tmax: tuple = (300., 300.),
     ecg_ch: str = "ECG003",
     eog_ch: str = ["EOG001", "EOG002"],
     reject_mag: float = 4e-12,
@@ -62,6 +64,7 @@ def preprocess_subject(
     additional_bads: tuple = (),
     n_jobs: int = 8,
     num_proj: tuple = (1,1), # ECG and EOG proj
+    verbose: bool = False,
 ):
     """
     Generic preprocessing pipeline for MEGIN resting-state data:
@@ -69,6 +72,12 @@ def preprocess_subject(
 
     Saves: report HTML, tSSS and filtered FIF files, head position .pos, and STC files.
     """
+    # ---- Verbose control ----
+    if not verbose:
+        mne.set_log_level("ERROR")
+    else:
+        mne.set_log_level("INFO")
+
     if bands is None:
         bands = {
             "delta": (1, 4),
@@ -79,19 +88,25 @@ def preprocess_subject(
             "g_high": (50, 90),
         }
 
-    mne.set_log_level("info")
-
     # ---- Directory setup ----
     subject = subject_id
     parent_path = os.path.abspath(root_dir)
     fs_dir = os.path.join(parent_path, subjects_dir_name)   # /MRI/freesurfer/sub-XX
-    meg_dir = os.path.join(parent_path, "MEG", subject)              # /MEG/sub-XX
-    deriv_dir = os.path.join(parent_path, "derivatives", subject)    # /derivatives/sub-XX
+    if session is None:
+        meg_dir = os.path.join(root_dir, "MEG", subject_id)
+        deriv_dir = os.path.join(parent_path, "derivatives", subject_id)    # /derivatives/sub-XX
+        head_pos_path = os.path.join(root_dir, "MEG", subject_id, subject_id +"_"+ resting +"_"+ "raw_head_pos.pos")
+    else:
+        meg_dir = os.path.join(root_dir, "MEG", subject_id, session)
+        deriv_dir = os.path.join(parent_path, "derivatives", subject_id, session)    # /derivatives/sub-XX
+        head_pos_path = os.path.join(root_dir, "MEG", subject_id, session, subject +"_"+ resting +"_"+ "raw_head_pos.pos")
+
     os.makedirs(deriv_dir, exist_ok=True)
 
     # ---- Expected inputs ----
-    path2raw_rest = os.path.join(meg_dir, rest_basename.format(sub=subject))
-    path2raw_erm = os.path.join(meg_dir, erm_basename.format(sub=subject))
+    path2raw_rest = os.path.join(meg_dir, rest_basename.format(sub=subject_id, rest=resting))
+    path2raw_erm = os.path.join(meg_dir, erm_basename.format(sub=subject_id))
+    
     if not os.path.exists(path2raw_rest):
         raise FileNotFoundError(f"Resting raw file not found: {path2raw_rest}")
     if not os.path.exists(path2raw_erm):
@@ -104,8 +119,8 @@ def preprocess_subject(
         print("⚠️ calibration/crosstalk not found, continuing without them (MNE will handle gracefully).")
 
     # ---- Report initialization ----
-    report_path = os.path.join(deriv_dir, f"{subject}_QC_report.html")
-    report = Report(title=f"{subject}_QC_report", raw_psd=True)
+    report_path = os.path.join(deriv_dir, f"{subject}_{inv_method}_{resting}_QC_report.html")
+    report = Report(title=f"{subject}_{inv_method}_{resting}_QC_report", raw_psd=True)
 
     # ---- Load data ----
     raw_rest = preprocessing.read_data(path2raw_rest)
@@ -117,17 +132,17 @@ def preprocess_subject(
 
     # ---- Head position ----
     try:
-        head_pos = mne.chpi.read_head_pos(path2raw_rest)
+        #head_pos_path = os.path.join(meg_dir,  "head_pos.pos")
+        head_pos = mne.chpi.read_head_pos(head_pos_path)
     except Exception as e:
-        print(f"⚠️ Could not read head_pos from {path2raw_rest}: {e}")
+        print(f"⚠️ Could not read head_pos from {head_pos_path}: {e}")
         head_pos = None
-    if head_pos is not None:
-        head_pos_path = os.path.join(deriv_dir, "head_pos.pos")
-        mne.chpi.write_head_pos(head_pos_path, head_pos)
+    #if head_pos is not None:
+    #   mne.chpi.write_head_pos(head_pos_path, head_pos)
 
     # ---- Cached tSSS paths ----
-    tsss_rest_path = os.path.join(deriv_dir, f"{subject}_rest1_raw_tsss_mc.fif")
-    tsss_erm_path = os.path.join(deriv_dir, f"{subject}_erm_raw_tsss.fif")
+    tsss_rest_path = os.path.join(meg_dir, f"{subject}_{resting}_raw_tsss.fif")
+    tsss_erm_path = os.path.join(meg_dir, f"{subject}_erm_raw_tsss.fif")
 
     if os.path.exists(tsss_rest_path) and os.path.exists(tsss_erm_path):
         print("→ Loading existing tSSS files...")
@@ -135,7 +150,7 @@ def preprocess_subject(
         raw_erm = mne.io.read_raw_fif(tsss_erm_path, preload=True)
         if head_pos is None:
             try:
-                head_pos = mne.chpi.read_head_pos(os.path.join(deriv_dir, "head_pos.pos"))
+                head_pos = mne.chpi.read_head_pos(head_pos_path)
             except Exception:
                 head_pos = None
     else:
@@ -158,9 +173,14 @@ def preprocess_subject(
             head_pos=None,
         )
         raw_erm.save(tsss_erm_path, overwrite=True)
-
+    
     # ---- PSD after tSSS ----
-    fig = raw_rest.compute_psd(fmax=250).plot(picks="data", exclude="bads", amplitude=True, show=False)
+    fig = raw_rest.compute_psd(fmax=250,
+            method="welch",
+            n_fft=int(4 * raw_rest.info["sfreq"]),     # 4-second window
+            n_overlap=int(2 * raw_rest.info["sfreq"]),     # 50% overlap (2-second)
+            average='mean',
+            window='hann').plot(picks="data", exclude="bads", amplitude=True, show=False)
     report.add_figure(fig=fig, title="PSD after tSSS")
 
     # ---- Temporal cropping ----
@@ -179,7 +199,13 @@ def preprocess_subject(
     if downsample:
         raw_rest.resample(downsample)
         raw_erm.resample(downsample)
-        fig = raw_rest.compute_psd(fmax=250).plot(picks="data", exclude="bads", amplitude=False, show=False)
+        fig = raw_rest.compute_psd(fmax=250,
+            method="welch",
+            n_fft=int(4 * raw_rest.info["sfreq"]),     # 4-second window
+            n_overlap=int(2 * raw_rest.info["sfreq"]),     # 50% overlap (2-second)
+            average='mean',
+            window='hann').plot(picks="data", exclude="bads", amplitude=True, show=False)
+
         report.add_figure(fig, title=f"PSD after filters + downsample ({downsample} Hz)")
 
     # ---- Additional bad channels ----
@@ -248,16 +274,52 @@ def preprocess_subject(
     report.add_covariance(noise_cov, info=raw_erm.info, title='Noise covariance')
 
     # ---- Save filtered raw ----
-    filt_path = os.path.join(deriv_dir, f"{subject}_rest_filt_proj_raw.fif")
+    filt_path = os.path.join(deriv_dir, f"{resting}_rest_filt_proj_raw.fif")
     raw_rest.save(filt_path, overwrite=True)
 
     # ======================================================
     #       SOURCE MODELING (BEM / SRC / FORWARD / INVERSE)
     # ======================================================
+
+    # ---- Coregistration metrics + report visualization ----
+
+
     trans_path = os.path.join(meg_dir, f"{subject}-trans_corr.fif")
+
+    if os.path.exists(trans_path):
+        # Load the .trans file
+        trans = mne.read_trans(trans_path)
+
+        # Compute dig → MRI distances
+        distances = mne.dig_mri_distances(
+            info=raw_rest.info,
+            trans=trans,
+            subject=subject,
+            subjects_dir=fs_dir
+        )
+
+        mean_distance_mm = np.mean(distances) * 1000
+        std_distance_mm  = np.std(distances)  * 1000
+
+        note = f"Distance: {mean_distance_mm:.2f} +- {std_distance_mm:.2f} mm"
+
+        report.add_trans(
+            trans=trans_path,
+            info=raw_rest.info,
+            subject=subject,
+            subjects_dir=fs_dir,
+            plot_kwargs=dict(surfaces='head-dense',
+            mri_fiducials=True, meg={"helmet": 0.1, "sensors": 0.1, "ref": 1}),
+            title=f'Coregistration._{note}',
+            alpha=1
+        )
+    else:
+        print(f"⚠️ Missing trans file: {trans_path}")
+
+    # ---- BEM ----
     bem_path = os.path.join(fs_dir, subject, "bem", f"{subject}-5120-5120-5120-bem-sol.fif")
     bem_dir = os.path.join(fs_dir, "bem")
-    src_path = os.path.join(deriv_dir, "src.fif")
+    src_path = os.path.join(deriv_dir, f"src.fif")
 
     if compute_bem_if_missing and not os.path.exists(bem_path):
         os.makedirs(bem_dir, exist_ok=True)
@@ -271,6 +333,8 @@ def preprocess_subject(
             print("→ Creating watershed BEM (if missing)...")
             try:
                 mne.bem.make_watershed_bem(subject=subject, subjects_dir=fs_dir, overwrite=True)
+                mne.bem.make_scalp_surfaces(subject=subject, subjects_dir=fs_dir, overwrite=True) #Creates the high resolution -head-dense.fif
+
             except Exception as e:
                 print(f"⚠️ Watershed BEM failed: {e}")
 
@@ -291,7 +355,7 @@ def preprocess_subject(
         fig = mne.viz.plot_alignment(
             subject=subject,
             subjects_dir=fs_dir,
-            surfaces="white",
+            surfaces="white", #white becuase mne use white for sourse reconstruction? 
             coord_frame="mri",
             src=src
         )
@@ -301,7 +365,7 @@ def preprocess_subject(
 
         # Safely close 3D figure
         plt.close("all")
-        mne.viz.close_3d_figure(fig)
+        mne.viz.close_3d_figure(fig) # Add sliding bar to rotate the brain
 
     except Exception as e:
         print(f"⚠️ BEM/alignment plots failed: {e}")
@@ -318,65 +382,90 @@ def preprocess_subject(
         print(f"⚠️ Foward solution failed: {e}")
 
     # ---- Inverse ----
+
+    # Choose the STC directory based on session
+
+    stc_dir = os.path.join(deriv_dir, inv_method + '_stc')
+
+    # Ensure directory exists
+    os.makedirs(stc_dir, exist_ok=True)
+
+    # Base filename for the STC
+    stc_base = f"{inv_method}_{resting}_stc"
+    stc_path = os.path.join(stc_dir, stc_base)   # <<--- correct final path
+
+    # Missing files check
     if not os.path.exists(trans_path):
         print(f"⚠️ Missing trans file: {trans_path}")
         stc = None
+
     elif not os.path.exists(bem_path):
         print(f"⚠️ Missing BEM file: {bem_path}")
         stc = None
-    else:
-        if inv_method != 'beamformer':
-            if not os.path.exists(os.path.join(deriv_dir,f'{subject}_{inv_method}_stc-lh.stc')):
-                print("→ Forward mne solution...")
-                
-                print(f"→ Inverse operator ({inv_method})...")
-                inv = mne.minimum_norm.make_inverse_operator(raw_rest.info, fwd, noise_cov, loose=0.2, depth=0.8)
-                lambda2 = 1.0 / (snr ** 2)
-                stc = mne.minimum_norm.apply_inverse_raw(raw_rest, inv, lambda2=lambda2, method=inv_method)
 
-                stc_dir = os.path.join(deriv_dir, "stc")
-                os.makedirs(stc_dir, exist_ok=True)
-                stc_path = os.path.join(stc_dir, f"{subject}_{inv_method}_stc")
+    else:
+        # ------------------ MINIMUM NORM ------------------
+        if inv_method != 'beamformer':
+
+            # Silence annoying joblib warnings
+            os.environ["JOBLIB_TEMP_FOLDER"] = "/tmp"
+            os.environ["JOBLIB_NO_MPI"] = "1"
+
+            # if STC does not exist: compute it
+            if not os.path.exists(stc_path + "-lh.stc"):
+                print("→ Forward solution...")
+                print(f"→ Inverse operator ({inv_method})...")
+
+                inv = mne.minimum_norm.make_inverse_operator(
+                    raw_rest.info, fwd, noise_cov, loose=0.2, depth=0.8
+                )
+
+                lambda2 = 1.0 / (snr ** 2)
+
+                stc = mne.minimum_norm.apply_inverse_raw(
+                    raw_rest, inv, lambda2=lambda2, method=inv_method
+                )
+
                 try:
-                    stc.save(stc_path,overwrite=True)
+                    stc.save(stc_path, overwrite=True)
                     print(f"→ STC saved at {stc_path}")
                 except Exception as e:
                     print(f"⚠️ Could not save STC: {e}")
 
-            else: 
-                print(f'Reading Source Estimation {inv_method}...')
-                stc = mne.read_source_estimate(deriv_dir+f"{subject}_{inv_method}_stc")
+            else:
+                print(f"→ Reading existing STC ({inv_method})...")
+                stc = mne.read_source_estimate(stc_path)
 
-        elif inv_method == 'beamformer':
-            if not os.path.exists(os.path.join(deriv_dir,'stc_beamformer-lh.stc')):
-                print('Computing Source Estimation Beamformer...')
+        # ------------------ BEAMFORMER ------------------
+        else:
+            if not os.path.exists(stc_path + "-lh.stc"):
+                print("Computing Source Estimation Beamformer...")
                 start, stop = raw_rest.time_as_index([crop_tmin[0], crop_tmax[0]])
-                raw_erm.pick('grad')
 
+                #Whats all this hyperparameters?! Make it more clear to you and everyone
                 filters = mne.beamformer.make_lcmv(
                     raw_rest.info,
                     fwd,
                     data_cov,
-                    reg=0.05,
-                    noise_cov=noise_cov, #The noise covariance. If provided, whitening will be done. Providing a noise covariance is mandatory if you mix sensor types, e.g. gradiometers with magnetometers or EEG with MEG.
-                    pick_ori="max-power",#Normal
+                    reg=0.05, #whats the regularization?
+                    noise_cov=noise_cov,
+                    pick_ori="max-power",
                     weight_norm="unit-noise-gain",
-                    rank='info')
+                    rank='info'
+                )
 
-                stc = mne.beamformer.apply_lcmv_raw(raw_rest, filters,start=start, stop=stop)
-                stc_dir = os.path.join(deriv_dir, "stc")
-                stc_path = os.path.join(stc_dir, f"{subject}_{inv_method}_stc")
-                os.makedirs(stc_path, exist_ok=True)
+                stc = mne.beamformer.apply_lcmv_raw(raw_rest, filters,
+                                                    start=start, stop=stop)
 
                 try:
-                    stc.save(stc_path,overwrite=True)
+                    stc.save(stc_path, overwrite=True)
                     print(f"→ STC saved at {stc_path}")
                 except Exception as e:
                     print(f"⚠️ Could not save STC: {e}")
 
-            else: 
-                print('Reading Source Estimation Beamformer...')
-                stc = mne.read_source_estimate(deriv_dir+'/stc_beamformer')
+            else:
+                print("→ Reading Beamformer STC...")
+                stc = mne.read_source_estimate(stc_path)
 
 
     # ======================================================
@@ -457,7 +546,7 @@ def preprocess_subject(
         plt.subplots_adjust(hspace=0, wspace=0)
 
         report.add_figure(fig, title='Spectrally Resolved Source Estimation')
-        output_path = os.path.join(deriv_dir, f"PSD_band_dist_{subject}.png")
+        output_path = os.path.join(deriv_dir, f"PSD_band_dist_{subject}_{inv_method}_{resting}.png")
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
         plt.close('all')
         report.add_figure(plt.figure(), title="Spectrally Resolved Source Estimation (placeholder panel)")
@@ -475,7 +564,9 @@ def _parse_args():
     p = argparse.ArgumentParser(description="Preprocess MEGIN task-free MEG data with ERM-SSP, tSSS, QC, and source modeling.")
     p.add_argument("--root_dir", required=True, type=str)
     p.add_argument("--subject_id", required=True, type=str)
-    p.add_argument("--rest_basename", type=str, default="{sub}_rest1_raw.fif")
+    p.add_argument("--session", default=None, required=True, help="Session by date or order (e.g., 01012020 or ses-1)")
+    p.add_argument("--resting", default='rest1', required=True, help="name or the resating state recording to porcess")
+    p.add_argument("--rest_basename", type=str, default="{sub}_{rest}_raw.fif")
     p.add_argument("--erm_basename", type=str, default="{sub}_erm_raw.fif")
     p.add_argument("--tsss_dir", type=str, default="/Users/isaant/Documents/PosDoc/Projects/tsss_params/2023")
     p.add_argument("--st_duration", type=float, default=10.0)
@@ -485,7 +576,7 @@ def _parse_args():
     p.add_argument("--line_freqs", type=float, nargs="*", default=[60, 120, 180])
     p.add_argument("--downsample", type=int, default=500)
     p.add_argument("--crop_tmin", type=float, nargs=2, default=[0.0, 30.0])
-    p.add_argument("--crop_tmax", type=float, nargs=2, default=[300.0, 420.0])
+    p.add_argument("--crop_tmax", type=float, nargs=2, default=[300.0, 300.0])
     p.add_argument("--ecg_ch", type=str, default="ECG003")
     p.add_argument("--eog_ch", type=str, default="EOG001")
     p.add_argument("--reject_mag", type=float, default=4e-12)
@@ -501,6 +592,7 @@ def _parse_args():
     p.add_argument("--num_proj", type=int, default=[1,1])
     # additional_bads como lista
     p.add_argument("--additional_bads", type=str, nargs="*", default=[])
+    p.add_argument("--verbose", action="store_true", help="Enable verbose MNE output")
     return p.parse_args()
 
 
@@ -509,6 +601,8 @@ if __name__ == "__main__":
     preprocess_subject(
         root_dir=args.root_dir,
         subject_id=args.subject_id,
+        session=args.session,
+        resting=args.resting,
         rest_basename=args.rest_basename,
         erm_basename=args.erm_basename,
         tsss_dir=args.tsss_dir,
@@ -531,5 +625,6 @@ if __name__ == "__main__":
         snr=args.snr,
         additional_bads=tuple(args.additional_bads),
         n_jobs=args.n_jobs,
-        num_proj=args.num_proj
+        num_proj=args.num_proj,
+        verbose=args.verbose,
     )
