@@ -28,7 +28,7 @@ from mne.report import Report
 
 # ---- custom user modules (as in your original script) ----
 import sys
-sys.path.append("/Users/isaant/python_modules")
+sys.path.append(os.environ['home'])
 from nanotools import preprocessing, postprocessing
 
 
