@@ -28,8 +28,8 @@ from mne.report import Report
 
 # ---- custom user modules (as in your original script) ----
 import sys
-sys.path.append(os.path.expanduser("~/mne_nanotools"))
-from nanotools import preprocessing, postprocessing
+sys.path.append(os.path.expanduser("~"))
+from mne_nanotools import preprocessing, postprocessing
 
 
 # ----------------------------------------------------------
