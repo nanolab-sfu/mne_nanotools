@@ -28,7 +28,7 @@ from mne.report import Report
 
 # ---- custom user modules (as in your original script) ----
 import sys
-sys.path.append(os.environ['home'])
+sys.path.append(os.path.expanduser("~"))
 from nanotools import preprocessing, postprocessing
 
 
