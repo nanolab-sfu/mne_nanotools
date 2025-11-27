@@ -5,6 +5,9 @@ Provides functions for computing power spectral density (PSD) and extracting fre
 power per vertex from SourceEstimate objects, as well as morphing results to a standard space.
 
 Author: isaant
+
+Last modified 27/11/2025
+
 """
 
 import mne

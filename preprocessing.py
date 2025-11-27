@@ -1,5 +1,9 @@
 import mne
+from scipy.stats import median_abs_deviation
+import numpy as np
+import matplotlib.pyplot as plt
 
+# Last modified 27/11/2025
 
 def read_data(fname):
     """
@@ -200,4 +204,224 @@ def read_montage(file_path):
     return channels
 
 
-# Use the updated function on the uploaded file
+
+def detect_bad_mad_grads_mags(raw, win_length=1.0, n_mad=3, abs_gradient=True, manual_thresholds=None, picks=None,):
+    """
+    Detect bad windows using MAD thresholds, automatically adapting to
+    the presence of MEG grad/mag channels. Works with CTF (grad only),
+    Elekta (grad+mag), or magnetometer-only systems.
+
+    Returns thresholds and metrics ONLY for sensors that exist.
+    A window is rejected if ANY of:
+        - max_p2p_grads
+        - max_grad_grads
+        - max_p2p_mags
+        - max_grad_mags
+    exceed thresholds.
+
+    Parameters
+    ----------
+    raw : mne.io.Raw
+        Raw data object.
+    win_length : float
+        Window size in seconds.
+    n_mad : float
+        Number of MADs above the median for auto-thresholds.
+    abs_gradient : bool
+        Use absolute value for gradient.
+    manual_thresholds : dict or None
+        {
+            "p2p_grads": value,
+            "grad_grads": value,
+            "p2p_mags": value,
+            "grad_mags": value,
+        }
+        If None → AUTO mode.
+    """
+
+    sfreq = raw.info["sfreq"]
+
+    # ---------------------------------------------------------
+    # Pick channel types available in this system
+    # ---------------------------------------------------------
+    picks_grads = mne.pick_types(raw.info, meg="grad")
+    picks_mags  = mne.pick_types(raw.info, meg="mag")
+
+    has_grads = len(picks_grads) > 0
+    has_mags  = len(picks_mags) > 0
+
+    # Load data only if those sensors exist
+    data_grads = raw.get_data(picks_grads, reject_by_annotation="omit") if has_grads else None
+    data_mags  = raw.get_data(picks_mags, reject_by_annotation="omit")  if has_mags  else None
+
+    n_samples = raw.n_times
+    win_samples = int(round(win_length * sfreq))
+    n_windows = n_samples // win_samples
+
+    # ---------------------------------------------------------
+    # Initialize metrics only for available sensor types
+    # ---------------------------------------------------------
+    metrics = {"win_bounds": []}
+
+    if has_grads:
+        metrics["max_p2p_grads"] = np.zeros(n_windows)
+        metrics["max_grad_grads"] = np.zeros(n_windows)
+
+    if has_mags:
+        metrics["max_p2p_mags"] = np.zeros(n_windows)
+        metrics["max_grad_mags"] = np.zeros(n_windows)
+
+    # ---------------------------------------------------------
+    # Loop windows
+    # ---------------------------------------------------------
+    for i in range(n_windows):
+        start = i * win_samples
+        stop  = start + win_samples
+        metrics["win_bounds"].append((start, stop))
+
+        # Extract window segments
+        if has_grads:
+            seg_grads = data_grads[:, start:stop]
+        if has_mags:
+            seg_mags  = data_mags[:, start:stop]
+
+        # --- P2P ---
+        if has_grads:
+            p2p_g = seg_grads.max(axis=1) - seg_grads.min(axis=1)
+            metrics["max_p2p_grads"][i] = p2p_g.max()
+
+        if has_mags:
+            p2p_m = seg_mags.max(axis=1) - seg_mags.min(axis=1)
+            metrics["max_p2p_mags"][i] = p2p_m.max()
+
+        # --- Gradient ---
+        if has_grads:
+            grad_g = np.gradient(seg_grads, 1/sfreq, axis=1)
+            if abs_gradient:
+                grad_g = np.abs(grad_g)
+            metrics["max_grad_grads"][i] = grad_g.max()
+
+        if has_mags:
+            grad_m = np.gradient(seg_mags, 1/sfreq, axis=1)
+            if abs_gradient:
+                grad_m = np.abs(grad_m)
+            metrics["max_grad_mags"][i] = grad_m.max()
+
+    # Thresholds based on MAD (only for available sensors)
+
+    thresholds = {}
+
+    if manual_thresholds is None:
+        if has_grads:
+            thresholds["p2p_grads"] = (
+                np.median(metrics["max_p2p_grads"]) +
+                n_mad * median_abs_deviation(metrics["max_p2p_grads"], scale=1)
+            )
+            thresholds["grad_grads"] = (
+                np.median(metrics["max_grad_grads"]) +
+                n_mad * median_abs_deviation(metrics["max_grad_grads"], scale=1)
+            )
+
+        if has_mags:
+            thresholds["p2p_mags"] = (
+                np.median(metrics["max_p2p_mags"]) +
+                n_mad * median_abs_deviation(metrics["max_p2p_mags"], scale=1)
+            )
+            thresholds["grad_mags"] = (
+                np.median(metrics["max_grad_mags"]) +
+                n_mad * median_abs_deviation(metrics["max_grad_mags"], scale=1)
+            )
+    else:
+        thresholds = manual_thresholds
+
+    
+    # Detect bad windows
+    bad_windows = []
+    bad_times = []
+    bounds = metrics["win_bounds"]
+
+    for i in range(n_windows):
+        cond = False
+
+        if has_grads:
+            cond |= metrics["max_p2p_grads"][i] > thresholds["p2p_grads"]
+            cond |= metrics["max_grad_grads"][i] > thresholds["grad_grads"]
+
+        if has_mags:
+            cond |= metrics["max_p2p_mags"][i] > thresholds["p2p_mags"]
+            cond |= metrics["max_grad_mags"][i] > thresholds["grad_mags"]
+
+        if cond:
+            bad_windows.append(i)
+            t0, t1 = bounds[i]
+            bad_times.append((t0 / sfreq, t1 / sfreq))
+
+    return n_windows, bad_windows, metrics, thresholds, bad_times
+
+
+def plot_mad_qc(n_windows, bad_windows, metrics, thresholds, subject_name="Subject"):
+    """
+    Produce Brainstorm-style QC histograms for P2P and gradient values.
+    Automatically suppresses plots for sensors that do not exist.
+    """
+
+    has_grads = "max_p2p_grads" in metrics
+    has_mags = "max_p2p_mags" in metrics
+
+    # Determine subplot grid size
+    n_rows = int(has_grads) + int(has_mags)
+    n_cols = 2  # P2P + Grad
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(10, 3 * n_rows))
+    if n_rows == 1:
+        axes = np.atleast_2d(axes)
+
+    row = 0
+
+    # -------------------------
+    # Gradiometers
+    # -------------------------
+    if has_grads:
+        p2p = metrics["max_p2p_grads"] * 1e15
+        grd = metrics["max_grad_grads"] * 1e15
+
+        axes[row, 0].hist(p2p, bins=20, color="dodgerblue")
+        axes[row, 0].axvline(thresholds["p2p_grads"] * 1e15, color="black", ls="--")
+        axes[row, 0].set_title("P2P Grads Distribution")
+        axes[row, 0].set_xlabel("fT")
+        axes[row, 0].set_ylabel("Windows count")
+        axes[row, 0].legend(["Threshold", "P2P range"])
+
+        axes[row, 1].hist(grd, bins=20, color="salmon")
+        axes[row, 1].axvline(thresholds["grad_grads"] * 1e15, color="black", ls="--")
+        axes[row, 1].set_title("Gradient Grads Distribution")
+        axes[row, 1].set_xlabel("fT")
+        axes[row, 1].set_ylabel("Windows count")
+        axes[row, 1].legend(["Threshold", "Gradient range"])
+
+        row += 1
+
+    # -------------------------
+    # Magnetometers
+    # -------------------------
+    if has_mags:
+        p2p = metrics["max_p2p_mags"] * 1e15
+        grd = metrics["max_grad_mags"] * 1e15
+
+        axes[row, 0].hist(p2p, bins=20, color="dodgerblue")
+        axes[row, 0].axvline(thresholds["p2p_mags"] * 1e15, color="black", ls="--")
+        axes[row, 0].set_title("P2P Mags Distribution")
+        axes[row, 0].set_xlabel("fT")
+        axes[row, 0].set_ylabel("Windows count")
+        axes[row, 0].legend(["Threshold", "P2P range"])
+
+        axes[row, 1].hist(grd, bins=20, color="salmon")
+        axes[row, 1].axvline(thresholds["grad_mags"] * 1e15, color="black", ls="--")
+        axes[row, 1].set_title("Gradient Mags Distribution")
+        axes[row, 1].set_xlabel("fT")
+        axes[row, 1].set_ylabel("Windows count")
+        axes[row, 1].legend(["Threshold", "Gradient range"])
+
+    plt.suptitle(f'Rejected {len(bad_windows)} / {n_windows} windows — {subject_name}')
+    plt.tight_layout()
+    return fig

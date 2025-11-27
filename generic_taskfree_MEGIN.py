@@ -1,11 +1,9 @@
-#%%
-#%%
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 Generic task-free MEGIN preprocessing with ERM-SSP, tSSS, QC report, and bandwise source PSDs.
 
-Version 0.1.0 - Last modified 15/11/2025
+Version 0.1.1 - Last modified 27/11/2025
 
 Example:
     python generic_taskfree_MEGIN.py \
@@ -119,7 +117,7 @@ def preprocess_subject(
         print("⚠️ calibration/crosstalk not found, continuing without them (MNE will handle gracefully).")
 
     # ---- Report initialization ----
-    report_path = os.path.join(deriv_dir, f"{subject}_{inv_method}_{resting}_QC_report.html")
+    report_path = os.path.join(deriv_dir, f"{subject}_{inv_method}_{resting}_QC_report_test.html")
     report = Report(title=f"{subject}_{inv_method}_{resting}_QC_report", raw_psd=True)
 
     # ---- Load data ----
@@ -197,9 +195,10 @@ def preprocess_subject(
 
     # ---- Downsample ----
     if downsample:
+        print(f"→ Downsampling to {downsample} Hz")
         raw_rest.resample(downsample)
         raw_erm.resample(downsample)
-        fig = raw_rest.compute_psd(fmax=250,
+        fig = raw_rest.compute_psd(fmax=200,
             method="welch",
             n_fft=int(4 * raw_rest.info["sfreq"]),     # 4-second window
             n_overlap=int(2 * raw_rest.info["sfreq"]),     # 50% overlap (2-second)
@@ -215,6 +214,7 @@ def preprocess_subject(
 
     # ---- ECG/EOG QC ----
     try:
+        print("→ EOG/ECG artifact detection")
         ecg_ev = mne.preprocessing.create_ecg_epochs(raw_rest, ch_name=ecg_ch).average()
         fig = ecg_ev.plot_joint(show=False)
         report.add_figure(fig, title="ECG events")
@@ -227,8 +227,10 @@ def preprocess_subject(
     except Exception as e:
         print(f"⚠️ EOG QC failed: {e}")
 
+    
     # ---- ERM-based SSP ----
     try:
+        print("→ Applying SSP")
         er_proj = mne.compute_proj_raw(raw_erm, n_grad=0, n_mag=3, verbose=True)
 
 
@@ -265,8 +267,45 @@ def preprocess_subject(
     except Exception as e:
         print(f"⚠️ SSP computation failed: {e}")
 
-    # ---- Data and noise covariance ----
 
+    # --- Amplitude and gradient thresholds ----
+    try:
+        print("→ Amplitude and gradient thresholding")
+        n_windows, bad_windows, metrics, thresholds, bad_times = preprocessing.detect_bad_mad_grads_mags(
+        raw_rest,
+        win_length=1.0,
+        n_mad=3,
+        )
+
+        fig = preprocessing.plot_mad_qc(n_windows, bad_windows, metrics, thresholds, subject_name=subject)
+        report.add_figure(fig, title='MAD amplitude/gradient QC', caption='P2P + gradient thresholds')
+        plt.close("all")
+        onset = [t[0]+raw_rest.first_time for t in bad_times]
+        duration = [t[1]-t[0] for t in bad_times]
+        labels = ["BAD_mad"] * len(bad_times)
+        orig_time = raw_rest.info["meas_date"]
+        ann = mne.Annotations(onset=onset, duration=duration, description=labels, orig_time=orig_time)
+        raw_rest.set_annotations(ann + raw_rest.annotations)
+        raw_rest.load_data() # Ensure BAD segments are masked
+
+        fig = raw_rest.compute_psd(fmax=200).plot(picks="data", exclude="bads", amplitude=True, show=False)
+
+        report.add_figure(fig, title=f"PSD after MAD")
+   
+        fig_butterfly = raw_rest.plot(start=0, duration=raw_rest.times[-1],show=False)
+        report.add_figure(
+            fig_butterfly,
+            title="Time Series (Bad Windows Range)",
+            caption=f"From first to last BAD_mad window ({bad_times[0][0]:.2f}s–{bad_times[-1][1]:.2f}s)"
+        )
+
+    
+    except Exception as e:
+        print(f"⚠️ MAD failed: {e}")
+
+
+    # ---- Data and noise covariance ----
+    print("→ Data and noise covariance")
     data_cov = mne.compute_raw_covariance(raw_rest, tmin=0, tmax=300)
     noise_cov = mne.compute_raw_covariance(raw_erm, tmin=0, tmax=300)
 
@@ -282,7 +321,7 @@ def preprocess_subject(
     # ======================================================
 
     # ---- Coregistration metrics + report visualization ----
-
+    print("→ Coregistration")
 
     trans_path = os.path.join(meg_dir, f"{subject}-trans_corr.fif")
 
@@ -301,7 +340,7 @@ def preprocess_subject(
         mean_distance_mm = np.mean(distances) * 1000
         std_distance_mm  = np.std(distances)  * 1000
 
-        note = f"Distance: {mean_distance_mm:.2f} +- {std_distance_mm:.2f} mm"
+        #note = f"Distance: {mean_distance_mm:.2f} +- {std_distance_mm:.2f} mm"
 
         report.add_trans(
             trans=trans_path,
@@ -310,7 +349,7 @@ def preprocess_subject(
             subjects_dir=fs_dir,
             plot_kwargs=dict(surfaces='head-dense',
             mri_fiducials=True, meg={"helmet": 0.1, "sensors": 0.1, "ref": 1}),
-            title=f'Coregistration._{note}',
+            title=f'Coregistration',
             alpha=1
         )
     else:
@@ -373,7 +412,7 @@ def preprocess_subject(
     # ---- Forward ----
 
     try:
-        print('Foward Solutions')
+        print('→ Foward Solutions')
         fwd = mne.make_forward_solution(
                     raw_rest.info, trans=trans_path, src=src, bem=bem_path, meg=True, eeg=False, mindist=0.0, n_jobs=n_jobs)
         fwd_fixed = mne.convert_forward_solution(fwd, surf_ori=True, force_fixed=False, use_cps=True)
@@ -406,7 +445,7 @@ def preprocess_subject(
     else:
         # ------------------ MINIMUM NORM ------------------
         if inv_method != 'beamformer':
-
+            print(f"→ Computing Source Estimation {inv_method}")
             # Silence annoying joblib warnings
             os.environ["JOBLIB_TEMP_FOLDER"] = "/tmp"
             os.environ["JOBLIB_NO_MPI"] = "1"
@@ -439,8 +478,8 @@ def preprocess_subject(
         # ------------------ BEAMFORMER ------------------
         else:
             if not os.path.exists(stc_path + "-lh.stc"):
-                print("Computing Source Estimation Beamformer...")
-                start, stop = raw_rest.time_as_index([crop_tmin[0], crop_tmax[0]])
+                print(f"→ Computing Source Estimation {inv_method}")
+                start, stop = raw_rest.time_as_index([crop_tmin[1], crop_tmax[0]])
 
                 #Whats all this hyperparameters?! Make it more clear to you and everyone
                 filters = mne.beamformer.make_lcmv(
