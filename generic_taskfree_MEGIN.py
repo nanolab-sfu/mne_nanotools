@@ -24,7 +24,7 @@ import numpy as np
 from importlib import reload
 from mne.report import Report
 
-# ---- custom user modules (as in your original script) ----
+# ---- custom user modules ----
 import sys
 sys.path.append(os.path.expanduser("~"))
 from mne_nanotools import preprocessing, postprocessing
