@@ -152,7 +152,7 @@ def run_remove_digitilized_points(root_dir, subject_id, session, task):
     # =====================================================================
     report_path = os.path.join(
         meg_dir,
-        f"{subject_id}_{session}_{resting}_digReport.pdf"
+        f"{subject_id}_{session}_{task}_digReport.pdf"
     )
 
     with PdfPages(report_path) as pdf:
