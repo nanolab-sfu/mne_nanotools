@@ -236,5 +236,5 @@ if __name__ == "__main__":
         root_dir=args.root_dir,
         subject_id=args.subject_id,
         session=args.session,
-        resting=args.resting,
+        task=args.task,
     )
