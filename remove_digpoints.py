@@ -42,8 +42,8 @@ def run_remove_digitilized_points(root_dir, subject_id, session, task):
     root_dir = os.path.abspath(root_dir)
     meg_dir = os.path.join(root_dir, "MEG", subject_id, session)
 
-    rest_basename = f"{subject_id}_{task}.fif"
-    path2raw_rest = os.path.join(meg_dir, rest_basename)
+    basename = f"{subject_id}_{session}_{task}.fif"
+    path2raw_rest = os.path.join(meg_dir, basename)
 
     if not os.path.exists(path2raw_rest):
         raise FileNotFoundError(f"Resting raw file not found:{path2raw_rest}")
