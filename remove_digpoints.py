@@ -43,13 +43,13 @@ def run_remove_digitilized_points(root_dir, subject_id, session, task):
     meg_dir = os.path.join(root_dir, "MEG", subject_id, session)
 
     basename = f"{subject_id}_{session}_{task}.fif"
-    path2raw_rest = os.path.join(meg_dir, basename)
+    path2raw = os.path.join(meg_dir, basename)
 
-    if not os.path.exists(path2raw_rest):
-        raise FileNotFoundError(f"Resting raw file not found:{path2raw_rest}")
+    if not os.path.exists(path2raw):
+        raise FileNotFoundError(f"Task raw file not found:{path2raw}")
 
     # ====== LOAD DATA ========================================================
-    raw = preprocessing.read_data(path2raw_rest)
+    raw = preprocessing.read_data(path2raw)
     dig = raw.info["dig"]
 
     # =====================================================================
@@ -170,7 +170,7 @@ def run_remove_digitilized_points(root_dir, subject_id, session, task):
 
         Subject:      {subject_id}
         Session:      {session}
-        Resting:      {resting}
+        Task:      {task}
 
         Fiducials (meters):
             LPA:  {lpa}
@@ -212,7 +212,7 @@ def run_remove_digitilized_points(root_dir, subject_id, session, task):
 
     raw.set_montage(mont, on_missing="ignore")
 
-    output_file = path2raw_rest.replace(".fif", "_digFiltered.fif")
+    output_file = path2raw.replace(".fif", "_digFiltered.fif")
     raw.save(output_file, overwrite=True)
 
     print(f"Saved cleaned file:\n{output_file}")
@@ -228,7 +228,7 @@ if __name__ == "__main__":
     parser.add_argument("--root_dir", required=True, help="Root project directory")
     parser.add_argument("--subject_id", required=True, help="Subject ID (e.g., sub-BRS0035)")
     parser.add_argument("--session", required=True, help="Session folder (e.g., 251016)")
-    parser.add_argument("--task", default="rest1", help="Resting-state run name")
+    parser.add_argument("--task", default="rest1", help="Task run name")
 
     args = parser.parse_args()
 
