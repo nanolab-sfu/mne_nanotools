@@ -7,11 +7,11 @@ and generate a report.
 Version 0.1.0 - Last modified 09/12/2025
 
 Usage example:
-    python generate_trans.py \
+    python remove_digipoints.py \
         --root_dir /Users/isaant/Documents/PosDoc/Projects/Variability_project/NVAR-data \
         --subject_id sub_NVAR008 \
         --session 251016 \
-        --resting rest1
+        --task rest1
 
 @author: isaant
 """
@@ -36,13 +36,13 @@ from mne_nanotools import preprocessing, postprocessing
 # MAIN FUNCTION
 # =====================================================================
 
-def run_remove_digitilized_points(root_dir, subject_id, session, resting):
+def run_remove_digitilized_points(root_dir, subject_id, session, task):
 
     # ====== BUILD PATHS ======================================================
     root_dir = os.path.abspath(root_dir)
     meg_dir = os.path.join(root_dir, "MEG", subject_id, session)
 
-    rest_basename = f"{subject_id}_{resting}_raw.fif"
+    rest_basename = f"{subject_id}_{task}.fif"
     path2raw_rest = os.path.join(meg_dir, rest_basename)
 
     if not os.path.exists(path2raw_rest):
@@ -228,7 +228,7 @@ if __name__ == "__main__":
     parser.add_argument("--root_dir", required=True, help="Root project directory")
     parser.add_argument("--subject_id", required=True, help="Subject ID (e.g., sub-BRS0035)")
     parser.add_argument("--session", required=True, help="Session folder (e.g., 251016)")
-    parser.add_argument("--resting", default="rest1", help="Resting-state run name")
+    parser.add_argument("--task", default="rest1", help="Resting-state run name")
 
     args = parser.parse_args()
 
