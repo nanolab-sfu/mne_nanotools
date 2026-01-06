@@ -3,10 +3,10 @@
 """
 Launch the MNE coregistration GUI to manually create or adjust the MEG-MRI transform (.trans.fif).
 
-Version 0.1.0 - Last modified 15/11/2025
+Version 0.1.0 - Last modified 06/01/2026
 
 Usage example:
-    python generate_trans.py \
+    python corregistration.py \
         --root_dir /Users/isaant/Documents/PosDoc/Projects/BRHRS \
         --subject_id sub-BRS0035 \
         --session 251016 \
@@ -16,6 +16,7 @@ Usage example:
 import os
 import argparse
 import mne
+import sys
 from mne.bem import make_scalp_surfaces, make_watershed_bem
 
 def open_coregistration_gui(root_dir, subject_id, subjects_dir_name="MRI/freesurfer", session=None, compute_bem_if_missing = True):
@@ -41,11 +42,15 @@ def open_coregistration_gui(root_dir, subject_id, subjects_dir_name="MRI/freesur
         meg_dir = os.path.join(root_dir, "MEG", subject_id)
     else:
         meg_dir = os.path.join(root_dir, "MEG", subject_id, session)
-    meg_files = [f for f in os.listdir(meg_dir) if f.endswith(".fif") and "raw" in f]
-    trans_path = os.path.join(meg_dir, f"{subject_id}-trans_corr.fif")
+    meg_files = [f for f in os.listdir(meg_dir) if f.endswith(".fif") and ("raw" in f or "meg" in f)]
+    trans_found = [f for f in os.listdir(meg_dir) if f.endswith("-corr_trans.fif")]
     bem_path = os.path.join(fs_dir, subject_id, "bem", f"{subject_id}-5120-5120-5120-bem-sol.fif")
     bem_dir = os.path.join(fs_dir,subject_id, "bem")
-
+    
+    if trans_found:
+        print(f"Found existing file: {trans_found[0]}. Skipping... \n")
+        sys.exit()
+    
     if compute_bem_if_missing and not os.path.exists(bem_path):
         print("→ Creating watershed BEM (if missing)...")
         try:   
@@ -80,10 +85,15 @@ def open_coregistration_gui(root_dir, subject_id, subjects_dir_name="MRI/freesur
     else:
         raw_path = None
         print("⚠️ No MEG raw file found — GUI will open without head points.")
-
-    print("\n✅ When you finish aligning in the GUI, click “Save” to write:")
-    print(f"   {meg_dir}/{subject_id}-corr_trans.fif")
-    print("Then simply close the GUI to end this script.")
+    
+    if session is None:
+        print("\n✅ When you finish aligning in the GUI, click “Save” to write:")
+        print(f"   {meg_dir}/{subject_id}-corr_trans.fif")
+        print("Then simply close the GUI to end this script.")
+    else:
+        print("\n✅ When you finish aligning in the GUI, click “Save” to write:")
+        print(f"   {meg_dir}/{subject_id}-{session}-corr_trans.fif")
+        print("Then simply close the GUI to end this script.")
     # Launch GUI
     mne.gui.coregistration(
         subject=subject_id,

@@ -3,7 +3,7 @@
 """
 Generic task-free MEGIN preprocessing with ERM-SSP, tSSS, QC report, and bandwise source PSDs.
 
-Version 0.1.1 - Last modified 27/11/2025
+Version 0.1.1 - Last modified 06/01/2026
 
 Example:
     python generic_taskfree_MEGIN.py \
@@ -30,15 +30,168 @@ sys.path.append(os.path.expanduser("~"))
 from mne_nanotools import preprocessing, postprocessing
 
 
+# Local file discovery helpers (supports MNE-style + BIDS-style + suffixed variants)
+# ----------------------------------------------------------
+
+def find_meg_fif(root_dir: str,
+                 subject_id: str,
+                 session: str | None = None,
+                 task: str | None = None,
+                 run: int | None = None,
+                 prefer: str = "any") -> Path:
+    """Find a single MEG FIF file for a subject/session/task.
+
+    Supports:
+      - MNE-style: sub_NVAR008_rest1_raw*.fif, sub_NVAR008_somatoauditory1_raw_tsss.fif
+      - BIDS-style: sub-BRS0034_ses-20241217_task-rest_run-1_meg*.fif
+      - BIDS + suffix: ..._meg_digFiltered.fif (or other *_meg_*.fif)
+
+    Notes
+    -----
+    - Run can be encoded as run-1 or run-01; we try both.
+    - Some datasets omit run entirely; we try both with/without run.
+    """
+
+    root = Path(root_dir).expanduser().resolve()
+    if not root.exists():
+        raise FileNotFoundError(f"root_dir not found: {root}")
+
+    # Normalize session: allow passing 'ses-XXXX' or just 'XXXX'
+    ses_norm = None
+    if session:
+        ses_norm = session if session.startswith("ses-") else f"ses-{session}"
+
+    candidates: list[Path] = []
+
+    # --- MNE-style patterns ---
+    if task:
+        candidates.extend(root.rglob(f"{subject_id}_{task}_raw*.fif"))
+
+    # --- BIDS-style patterns ---
+    if ses_norm and task:
+        if run is None:
+            run_parts = ["", "_run-*", "_run-??"]
+        else:
+            r = int(run)
+            run_parts = [f"_run-{r}", f"_run-{r:02d}"]
+
+        for run_part in run_parts:
+            patt_bids = f"{subject_id}_{ses_norm}_task-{task}{run_part}_meg*.fif"
+            candidates.extend(root.rglob(patt_bids))
+
+    # De-duplicate and keep files only
+    candidates = sorted({c.resolve() for c in candidates if c.is_file()})
+
+    if not candidates:
+        raise FileNotFoundError(
+            "No MEG FIF found.\n"
+            f"  root_dir={root}\n  subject_id={subject_id}\n  session={session}\n  task={task}\n  run={run}\n"
+            "Tried MNE-style and BIDS-style patterns.\n"
+            "If this is BIDS, check whether run is zero-padded (run-01) or omitted.\n"
+        )
+
+    def score(p: Path) -> int:
+        name = p.name
+        s = 0
+        if prefer == "digFiltered":
+            s += 10 if "digFiltered" in name else 0
+        elif prefer == "raw":
+            s += 10 if "digFiltered" not in name else 0
+        # Prefer exact '_meg.fif' over suffixed variants when ties remain
+        if re.search(r"_meg\.fif$", name):
+            s += 2
+        return s
+
+    candidates = sorted(candidates, key=score, reverse=True)
+
+    if len(candidates) > 1:
+        print("Multiple candidates found. Using best match:")
+        for c in candidates[:10]:
+            print(f"  - {c}")
+        print(f"Selected: {candidates[0]}")
+
+    return candidates[0]
+
+
+def find_erm_fif(root_dir: str,
+                 subject_id: str,
+                 session: str | None = None) -> Path:
+    """Find ERM FIF for either naming style:
+
+    Supports:
+      - MNE:  sub_NVAR008_erm_raw*.fif
+      - BIDS: sub-BRS0276_ses-20250710_task-erm_meg*.fif
+    """
+
+    root = Path(root_dir).expanduser().resolve()
+    if not root.exists():
+        raise FileNotFoundError(f"root_dir not found: {root}")
+
+    ses_norm = None
+    if session:
+        ses_norm = session if session.startswith("ses-") else f"ses-{session}"
+
+    candidates: list[Path] = []
+
+    # MNE-style ERM
+    candidates.extend(root.rglob(f"{subject_id}_erm_raw*.fif"))
+
+    # BIDS-style ERM
+    if ses_norm:
+        candidates.extend(root.rglob(f"{subject_id}_{ses_norm}_task-erm*_meg*.fif"))
+
+    candidates = sorted({c.resolve() for c in candidates if c.is_file()})
+
+    if not candidates:
+        raise FileNotFoundError(
+            "No ERM FIF found.\n"
+            f"  root_dir={root}\n  subject_id={subject_id}\n  session={session}\n"
+            "Tried MNE-style and BIDS-style ERM patterns.\n"
+        )
+
+    candidates = sorted(candidates, key=lambda p: (len(p.name), p.name))
+
+    if len(candidates) > 1:
+        print("Multiple ERM candidates found. Using best match:")
+        for c in candidates[:10]:
+            print(f"  - {c}")
+        print(f"Selected ERM: {candidates[0]}")
+
+    return candidates[0]
+
+# ----------------------------------------------------------
+
+# ----------------------------------------------------------
+# Helpers
+# ----------------------------------------------------------
+
+def _already_has_sss(r: mne.io.BaseRaw) -> bool:
+    """Return True if Maxwell/SSS/tSSS has already been applied to this Raw."""
+    try:
+        ph = r.info.get("proc_history", [])
+    except Exception:
+        ph = []
+    if not ph:
+        return False
+    # MNE stores Maxwell filtering provenance in proc_history entries (typically under 'max_info')
+    for entry in ph:
+        if isinstance(entry, dict) and ("max_info" in entry):
+            return True
+    return False
+
+
 # ----------------------------------------------------------
 # Main preprocessing function
 # ----------------------------------------------------------
+
 def preprocess_subject(
     root_dir: str,
     subject_id: str,
-    session:None,
-    resting = 'rest1',
-    rest_basename: str = "{sub}_{rest}_raw.fif",
+    session: str | None = None,
+    task: str = 'rest1',
+    in_fif: str | None = None,
+    erm_fif: str | None = None,
+    task_basename: str = "{sub}_{task}_raw.fif",
     erm_basename: str = "{sub}_erm_raw.fif",
     tsss_dir: str = "/Users/isaant/Documents/PosDoc/Projects/tsss_params/2023",
     st_duration: float = 10.0,
@@ -93,20 +246,35 @@ def preprocess_subject(
     if session is None:
         meg_dir = os.path.join(root_dir, "MEG", subject_id)
         deriv_dir = os.path.join(parent_path, "derivatives", subject_id)    # /derivatives/sub-XX
-        head_pos_path = os.path.join(root_dir, "MEG", subject_id, subject_id +"_"+ resting +"_"+ "raw_head_pos.pos")
+
     else:
         meg_dir = os.path.join(root_dir, "MEG", subject_id, session)
         deriv_dir = os.path.join(parent_path, "derivatives", subject_id, session)    # /derivatives/sub-XX
-        head_pos_path = os.path.join(root_dir, "MEG", subject_id, session, subject +"_"+ resting +"_"+ "raw_head_pos.pos")
+
 
     os.makedirs(deriv_dir, exist_ok=True)
 
     # ---- Expected inputs ----
-    path2raw_rest = os.path.join(meg_dir, rest_basename.format(sub=subject_id, rest=resting))
-    path2raw_erm = os.path.join(meg_dir, erm_basename.format(sub=subject_id))
-    
-    if not os.path.exists(path2raw_rest):
-        raise FileNotFoundError(f"Resting raw file not found: {path2raw_rest}")
+    if in_fif is not None:
+        path2raw = str(Path(in_fif).expanduser().resolve())
+    else:
+        path2raw = os.path.join(meg_dir, task_basename.format(sub=subject_id, task=task))
+
+    # ---- Head position path (derived from input FIF filename) ----
+    # Examples:
+    #   sub_NVAR008_rest1_raw.fif -> sub_NVAR008_rest1_raw_head_pos.pos
+    #   sub-BRS0034_ses-20241217_task-rest_run-1_meg_digFiltered.fif -> ..._meg_digFiltered_head_pos.pos
+    head_pos_path = str(Path(path2raw).with_suffix("") ) + "_head_pos.pos"
+
+    if erm_fif is not None:
+        path2raw_erm = str(Path(erm_fif).expanduser().resolve())
+    else:
+        # fallback to legacy template (still works for MNE-style if located in meg_dir)
+        path2raw_erm = os.path.join(meg_dir, erm_basename.format(sub=subject_id))
+
+
+    if not os.path.exists(path2raw):
+        raise FileNotFoundError(f"Raw file not found: {path2raw}")
     if not os.path.exists(path2raw_erm):
         raise FileNotFoundError(f"ERM raw file not found: {path2raw_erm}")
 
@@ -117,34 +285,39 @@ def preprocess_subject(
         print("⚠️ calibration/crosstalk not found, continuing without them (MNE will handle gracefully).")
 
     # ---- Report initialization ----
-    report_path = os.path.join(deriv_dir, f"{subject}_{inv_method}_{resting}_QC_report_test.html")
-    report = Report(title=f"{subject}_{inv_method}_{resting}_QC_report", raw_psd=True)
+    report = Report(title=Path(os.path.basename(path2raw)).stem  + "_QC_report", raw_psd=True)
 
     # ---- Load data ----
-    raw_rest = preprocessing.read_data(path2raw_rest)
-    raw_rest.del_proj()
+    raw = preprocessing.read_data(path2raw)
+    raw.del_proj()
     raw_erm = preprocessing.read_data(path2raw_erm)
     raw_erm.del_proj()
 
-    report.add_raw(raw=raw_rest, title="Raw Resting")
+    report.add_raw(raw=raw, title="Raw Resting")
 
     # ---- Head position ----
+    
     try:
         #head_pos_path = os.path.join(meg_dir,  "head_pos.pos")
         head_pos = mne.chpi.read_head_pos(head_pos_path)
     except Exception as e:
-        print(f"⚠️ Could not read head_pos from {head_pos_path}: {e}")
-        head_pos = None
-    #if head_pos is not None:
-    #   mne.chpi.write_head_pos(head_pos_path, head_pos)
+        print(f"⚠️ Could not read head_pos from {head_pos_path}: {e}, it will be computed now")
+        head_pos = preprocessing.compute_head_position(raw)
+        mne.chpi.write_head_pos(head_pos_path, head_pos)
 
-    # ---- Cached tSSS paths ----
-    tsss_rest_path = os.path.join(meg_dir, f"{subject}_{resting}_raw_tsss.fif")
-    tsss_erm_path = os.path.join(meg_dir, f"{subject}_erm_raw_tsss.fif")
+    # ---- Cached tSSS paths (derived from input FIF filenames) ----
+    # Examples:
+    #   sub_NVAR008_rest1_raw.fif -> sub_NVAR008_rest1_raw_tsss.fif
+    #   sub-BRS0034_ses-20241217_task-rest_run-1_meg_digFiltered.fif -> ..._meg_digFiltered_tsss.fif
+    tsss_raw_path = str(Path(path2raw).with_suffix("")) + "_tsss.fif"
 
-    if os.path.exists(tsss_rest_path) and os.path.exists(tsss_erm_path):
+    #   sub_NVAR008_erm_raw.fif -> sub_NVAR008_erm_raw_tsss.fif
+    #   sub-BRS0034_ses-20241217_task-erm_meg.fif -> ..._task-erm_meg_tsss.fif
+    tsss_erm_path = str(Path(path2raw_erm).with_suffix("")) + "_tsss.fif"
+
+    if os.path.exists(tsss_raw_path) and os.path.exists(tsss_erm_path):
         print("→ Loading existing tSSS files...")
-        raw_rest = mne.io.read_raw_fif(tsss_rest_path, preload=True)
+        raw = mne.io.read_raw_fif(tsss_raw_path, preload=True)
         raw_erm = mne.io.read_raw_fif(tsss_erm_path, preload=True)
         if head_pos is None:
             try:
@@ -152,31 +325,47 @@ def preprocess_subject(
             except Exception:
                 head_pos = None
     else:
-        print("→ Applying tSSS to resting...")
-        raw_rest = preprocessing.max_filter(
-            raw_rest,
-            calibration=calibration if os.path.exists(calibration) else None,
-            cross_talk=cross_talk if os.path.exists(cross_talk) else None,
-            st_duration=st_duration,
-            head_pos=head_pos,
-        )
-        raw_rest.save(tsss_rest_path, overwrite=True)
+        # ---------- REST / TASK DATA ----------
+        if _already_has_sss(raw):
+            print("→ Input data already has Maxwell/SSS applied; skipping tSSS and caching as-is...")
+            if not os.path.exists(tsss_raw_path):
+                raw.save(tsss_raw_path, overwrite=True)
+        else:
+            print("→ Applying tSSS to resting...")
+            raw = preprocessing.max_filter(
+                raw,
+                calibration=calibration if os.path.exists(calibration) else None,
+                cross_talk=cross_talk if os.path.exists(cross_talk) else None,
+                st_duration=st_duration,
+                head_pos=head_pos,
+            )
+            raw.save(tsss_raw_path, overwrite=True)
 
-        print("→ Applying SSS to ERM...")
-        raw_erm = preprocessing.max_filter(
-            raw_erm,
-            calibration=calibration if os.path.exists(calibration) else None,
-            cross_talk=cross_talk if os.path.exists(cross_talk) else None,
-            st_duration=sss_erm_st_duration,
-            head_pos=None,
-        )
-        raw_erm.save(tsss_erm_path, overwrite=True)
+        # ---------- ERM ----------
+        if _already_has_sss(raw_erm):
+            print("→ ERM already has Maxwell/SSS applied; skipping SSS and caching as-is...")
+            if not os.path.exists(tsss_erm_path):
+                raw_erm.save(tsss_erm_path, overwrite=True)
+        else:
+            print("→ Applying SSS to ERM...")
+            raw_erm = preprocessing.max_filter(
+                raw_erm,
+                calibration=calibration if os.path.exists(calibration) else None,
+                cross_talk=cross_talk if os.path.exists(cross_talk) else None,
+                st_duration=sss_erm_st_duration,
+                head_pos=None,
+            )
+            raw_erm.save(tsss_erm_path, overwrite=True)
     
+    # Rename path2raw to facilitate naming conventions
+    path2raw = tsss_raw_path
+    path2raw_erm = tsss_erm_path
+
     # ---- PSD after tSSS ----
-    fig = raw_rest.compute_psd(fmax=250,
+    fig = raw.compute_psd(fmax=250,
             method="welch",
-            n_fft=int(4 * raw_rest.info["sfreq"]),     # 4-second window
-            n_overlap=int(2 * raw_rest.info["sfreq"]),     # 50% overlap (2-second)
+            n_fft=int(4 * raw.info["sfreq"]),     # 4-second window
+            n_overlap=int(2 * raw.info["sfreq"]),     # 50% overlap (2-second)
             average='mean',
             window='hann').plot(picks="data", exclude="bads", amplitude=True, show=False)
     report.add_figure(fig=fig, title="PSD after tSSS")
@@ -184,24 +373,24 @@ def preprocess_subject(
     # ---- Temporal cropping ----
     try:
         raw_erm.crop(tmin=crop_tmin[0], tmax=crop_tmax[0])
-        raw_rest.crop(tmin=crop_tmin[1], tmax=crop_tmax[1])
+        raw.crop(tmin=crop_tmin[1], tmax=crop_tmax[1])
     except Exception as e:
         print(f"⚠️ Cropping failed: {e}")
 
     # ---- Filtering & notch ----
     print(f"→ Filtering {l_freq}-{h_freq} Hz, notch {line_freqs}")
-    raw_rest = preprocessing.filter_data(raw_rest, l_freq=l_freq, h_freq=h_freq, line_freqs=line_freqs)
+    raw = preprocessing.filter_data(raw, l_freq=l_freq, h_freq=h_freq, line_freqs=line_freqs)
     raw_erm = preprocessing.filter_data(raw_erm, l_freq=l_freq, h_freq=h_freq, line_freqs=line_freqs)
 
     # ---- Downsample ----
     if downsample:
         print(f"→ Downsampling to {downsample} Hz")
-        raw_rest.resample(downsample)
+        raw.resample(downsample)
         raw_erm.resample(downsample)
-        fig = raw_rest.compute_psd(fmax=200,
+        fig = raw.compute_psd(fmax=200,
             method="welch",
-            n_fft=int(4 * raw_rest.info["sfreq"]),     # 4-second window
-            n_overlap=int(2 * raw_rest.info["sfreq"]),     # 50% overlap (2-second)
+            n_fft=int(4 * raw.info["sfreq"]),     # 4-second window
+            n_overlap=int(2 * raw.info["sfreq"]),     # 50% overlap (2-second)
             average='mean',
             window='hann').plot(picks="data", exclude="bads", amplitude=True, show=False)
 
@@ -209,19 +398,19 @@ def preprocess_subject(
 
     # ---- Additional bad channels ----
     if additional_bads:
-        raw_rest.info["bads"].extend(additional_bads)
+        raw.info["bads"].extend(additional_bads)
         raw_erm.info["bads"].extend(additional_bads)
 
     # ---- ECG/EOG QC ----
     try:
         print("→ EOG/ECG artifact detection")
-        ecg_ev = mne.preprocessing.create_ecg_epochs(raw_rest, ch_name=ecg_ch).average()
+        ecg_ev = mne.preprocessing.create_ecg_epochs(raw, ch_name=ecg_ch).average()
         fig = ecg_ev.plot_joint(show=False)
         report.add_figure(fig, title="ECG events")
     except Exception as e:
         print(f"⚠️ ECG QC failed: {e}")
     try:
-        eog_ev = mne.preprocessing.create_eog_epochs(raw_rest, ch_name=eog_ch).average()
+        eog_ev = mne.preprocessing.create_eog_epochs(raw, ch_name=eog_ch).average()
         fig = eog_ev.plot_joint(show=False)
         report.add_figure(fig, title="EOG events")
     except Exception as e:
@@ -235,7 +424,7 @@ def preprocess_subject(
 
 
         #%% Create SSP ecg/eog projectors
-        ecg_proj, ecg_array = mne.preprocessing.compute_proj_ecg(raw_rest,n_grad=3,n_mag=3) # For ECG proj, first pca is always enough
+        ecg_proj, ecg_array = mne.preprocessing.compute_proj_ecg(raw,n_grad=3,n_mag=3) # For ECG proj, first pca is always enough
         fig = mne.viz.plot_projs_joint(ecg_proj, ecg_ev, show=False)
         fig.suptitle("ECG projectors")
         exp_var = []
@@ -244,7 +433,7 @@ def preprocess_subject(
             exp_var.append('%, ')
         report.add_figure(fig, title='Ecg Projections', caption = f"{', '.join(exp_var)} — num of proj selected = {num_proj[0]}")
             
-        eog_proj, eog_array = mne.preprocessing.compute_proj_eog(raw_rest,n_grad=3,n_mag=3) # Default options look fine
+        eog_proj, eog_array = mne.preprocessing.compute_proj_eog(raw,n_grad=3,n_mag=3) # Default options look fine
         fig = mne.viz.plot_projs_joint(eog_proj, eog_ev, show=False)
         fig.suptitle("EOG projectors")
         exp_var = []
@@ -255,14 +444,14 @@ def preprocess_subject(
 
         # EOG/ECG projections
         for i in range(0,num_proj[0]):
-            raw_rest.add_proj(ecg_proj[i]) #For ECG proj, first pca is always enough
+            raw.add_proj(ecg_proj[i]) #For ECG proj, first pca is always enough
             raw_erm.add_proj(ecg_proj[i]) 
 
         for i in range(0,num_proj[1]):
-            raw_rest.add_proj(eog_proj[i]) #For EOG proj, first pca seems enough
+            raw.add_proj(eog_proj[i]) #For EOG proj, first pca seems enough
             raw_erm.add_proj(eog_proj[i])
 
-        raw_rest.apply_proj()
+        raw.apply_proj()
         raw_erm.apply_proj()
     except Exception as e:
         print(f"⚠️ SSP computation failed: {e}")
@@ -272,7 +461,7 @@ def preprocess_subject(
     try:
         print("→ Amplitude and gradient thresholding")
         n_windows, bad_windows, metrics, thresholds, bad_times = preprocessing.detect_bad_mad_grads_mags(
-        raw_rest,
+        raw,
         win_length=1.0,
         n_mad=3,
         )
@@ -280,19 +469,19 @@ def preprocess_subject(
         fig = preprocessing.plot_mad_qc(n_windows, bad_windows, metrics, thresholds, subject_name=subject)
         report.add_figure(fig, title='MAD amplitude/gradient QC', caption='P2P + gradient thresholds')
         plt.close("all")
-        onset = [t[0]+raw_rest.first_time for t in bad_times]
+        onset = [t[0]+raw.first_time for t in bad_times]
         duration = [t[1]-t[0] for t in bad_times]
         labels = ["BAD_mad"] * len(bad_times)
-        orig_time = raw_rest.info["meas_date"]
+        orig_time = raw.info["meas_date"]
         ann = mne.Annotations(onset=onset, duration=duration, description=labels, orig_time=orig_time)
-        raw_rest.set_annotations(ann + raw_rest.annotations)
-        raw_rest.load_data() # Ensure BAD segments are masked
+        raw.set_annotations(ann + raw.annotations)
+        raw.load_data() # Ensure BAD segments are masked
 
-        fig = raw_rest.compute_psd(fmax=200).plot(picks="data", exclude="bads", amplitude=True, show=False)
+        fig = raw.compute_psd(fmax=200).plot(picks="data", exclude="bads", amplitude=True, show=False)
 
         report.add_figure(fig, title=f"PSD after MAD")
    
-        fig_butterfly = raw_rest.plot(start=0, duration=raw_rest.times[-1],show=False)
+        fig_butterfly = raw.plot(start=0, duration=raw.times[-1],show=False)
         report.add_figure(
             fig_butterfly,
             title="Time Series (Bad Windows Range)",
@@ -306,15 +495,15 @@ def preprocess_subject(
 
     # ---- Data and noise covariance ----
     print("→ Data and noise covariance")
-    data_cov = mne.compute_raw_covariance(raw_rest, tmin=0, tmax=300)
+    data_cov = mne.compute_raw_covariance(raw, tmin=0, tmax=300)
     noise_cov = mne.compute_raw_covariance(raw_erm, tmin=0, tmax=300)
 
-    report.add_covariance(data_cov, info=raw_rest.info, title='Data covariance')
+    report.add_covariance(data_cov, info=raw.info, title='Data covariance')
     report.add_covariance(noise_cov, info=raw_erm.info, title='Noise covariance')
 
     # ---- Save filtered raw ----
-    filt_path = os.path.join(deriv_dir, f"{resting}_rest_filt_proj_raw.fif")
-    raw_rest.save(filt_path, overwrite=True)
+    filt_path = os.path.join(str(Path(path2raw).with_suffix("") ) + "_filt_proj.fif")
+    raw.save(filt_path, overwrite=True)
 
     # ======================================================
     #       SOURCE MODELING (BEM / SRC / FORWARD / INVERSE)
@@ -323,7 +512,12 @@ def preprocess_subject(
     # ---- Coregistration metrics + report visualization ----
     print("→ Coregistration")
 
-    trans_path = os.path.join(meg_dir, f"{subject}-trans_corr.fif")
+    trans_path = os.path.join(meg_dir, f"{subject}-{session}-corr_trans.fif")
+        # ---- Cached tSSS paths (derived from input FIF filenames) ----
+    # Examples:
+    #   sub_NVAR008_rest1_raw.fif -> sub_NVAR008_rest1_raw_tsss.fif
+    #   sub-BRS0034_ses-20241217_task-rest_run-1_meg_digFiltered.fif -> ..._meg_digFiltered_tsss.fif
+    tsss_raw_path = str(Path(path2raw).with_suffix("")) + "_tsss.fif"
 
     if os.path.exists(trans_path):
         # Load the .trans file
@@ -331,7 +525,7 @@ def preprocess_subject(
 
         # Compute dig → MRI distances
         distances = mne.dig_mri_distances(
-            info=raw_rest.info,
+            info=raw.info,
             trans=trans,
             subject=subject,
             subjects_dir=fs_dir
@@ -344,7 +538,7 @@ def preprocess_subject(
 
         report.add_trans(
             trans=trans_path,
-            info=raw_rest.info,
+            info=raw.info,
             subject=subject,
             subjects_dir=fs_dir,
             plot_kwargs=dict(surfaces='head-dense',
@@ -358,7 +552,7 @@ def preprocess_subject(
     # ---- BEM ----
     bem_path = os.path.join(fs_dir, subject, "bem", f"{subject}-5120-5120-5120-bem-sol.fif")
     bem_dir = os.path.join(fs_dir, "bem")
-    src_path = os.path.join(deriv_dir, f"src.fif")
+    src_path = os.path.join(deriv_dir, Path(os.path.basename(path2raw)).stem + "_src.fif")
 
     if compute_bem_if_missing and not os.path.exists(bem_path):
         os.makedirs(bem_dir, exist_ok=True)
@@ -414,7 +608,7 @@ def preprocess_subject(
     try:
         print('→ Foward Solutions')
         fwd = mne.make_forward_solution(
-                    raw_rest.info, trans=trans_path, src=src, bem=bem_path, meg=True, eeg=False, mindist=0.0, n_jobs=n_jobs)
+                    raw.info, trans=trans_path, src=src, bem=bem_path, meg=True, eeg=False, mindist=0.0, n_jobs=n_jobs)
         fwd_fixed = mne.convert_forward_solution(fwd, surf_ori=True, force_fixed=False, use_cps=True)
 
     except Exception as e:
@@ -424,14 +618,15 @@ def preprocess_subject(
 
     # Choose the STC directory based on session
 
-    stc_dir = os.path.join(deriv_dir, inv_method + '_stc')
+    stc_dir = os.path.join(deriv_dir, inv_method, 'stc')
 
     # Ensure directory exists
     os.makedirs(stc_dir, exist_ok=True)
 
     # Base filename for the STC
-    stc_base = f"{inv_method}_{resting}_stc"
+    stc_base = Path(os.path.basename(path2raw)).stem + f"_{inv_method}_stc"
     stc_path = os.path.join(stc_dir, stc_base)   # <<--- correct final path
+
 
     # Missing files check
     if not os.path.exists(trans_path):
@@ -456,13 +651,13 @@ def preprocess_subject(
                 print(f"→ Inverse operator ({inv_method})...")
 
                 inv = mne.minimum_norm.make_inverse_operator(
-                    raw_rest.info, fwd, noise_cov, loose=0.2, depth=0.8
+                    raw.info, fwd, noise_cov, loose=0.2, depth=0.8
                 )
 
                 lambda2 = 1.0 / (snr ** 2)
 
                 stc = mne.minimum_norm.apply_inverse_raw(
-                    raw_rest, inv, lambda2=lambda2, method=inv_method
+                    raw, inv, lambda2=lambda2, method=inv_method
                 )
 
                 try:
@@ -479,11 +674,11 @@ def preprocess_subject(
         else:
             if not os.path.exists(stc_path + "-lh.stc"):
                 print(f"→ Computing Source Estimation {inv_method}")
-                start, stop = raw_rest.time_as_index([crop_tmin[1], crop_tmax[0]])
+                start, stop = raw.time_as_index([crop_tmin[1], crop_tmax[0]])
 
                 #Whats all this hyperparameters?! Make it more clear to you and everyone
                 filters = mne.beamformer.make_lcmv(
-                    raw_rest.info,
+                    raw.info,
                     fwd,
                     data_cov,
                     reg=0.05, #whats the regularization?
@@ -493,7 +688,7 @@ def preprocess_subject(
                     rank='info'
                 )
 
-                stc = mne.beamformer.apply_lcmv_raw(raw_rest, filters,
+                stc = mne.beamformer.apply_lcmv_raw(raw, filters,
                                                     start=start, stop=stop)
 
                 try:
@@ -585,8 +780,12 @@ def preprocess_subject(
         plt.subplots_adjust(hspace=0, wspace=0)
 
         report.add_figure(fig, title='Spectrally Resolved Source Estimation')
-        output_path = os.path.join(deriv_dir, f"PSD_band_dist_{subject}_{inv_method}_{resting}.png")
-        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        report_dir = os.path.join(deriv_dir, inv_method, 'report')
+        report_path = os.path.join(report_dir, Path(os.path.basename(path2raw)).stem + "_QC_report.html")
+        # Ensure directory exists
+        os.makedirs(report_dir, exist_ok=True)
+        fig_path = os.path.join(report_dir, f"PSD_band_dist" + Path(os.path.basename(path2raw)).stem + ".png")
+        plt.savefig(fig_path, dpi=300, bbox_inches='tight')
         plt.close('all')
         report.add_figure(plt.figure(), title="Spectrally Resolved Source Estimation (placeholder panel)")
 
@@ -603,9 +802,14 @@ def _parse_args():
     p = argparse.ArgumentParser(description="Preprocess MEGIN task-free MEG data with ERM-SSP, tSSS, QC, and source modeling.")
     p.add_argument("--root_dir", required=True, type=str)
     p.add_argument("--subject_id", required=True, type=str)
-    p.add_argument("--session", default=None, required=True, help="Session by date or order (e.g., 01012020 or ses-1)")
-    p.add_argument("--resting", default='rest1', required=True, help="name or the resating state recording to porcess")
-    p.add_argument("--rest_basename", type=str, default="{sub}_{rest}_raw.fif")
+    p.add_argument("--session", default=None, required=False, help="Session (e.g., 20241217 or ses-20241217). Optional for MNE-style naming.")
+    p.add_argument("--resting", default='rest1', required=False, help="Backward-compatible alias for --task (e.g., rest1/rest2).")
+    p.add_argument("--task", default=None, required=False, help="Generic task name. Examples: rest, msit, somatoauditory1, rest1.")
+    p.add_argument("--run", type=int, default=None, required=False, help="BIDS run number (e.g., 1, 2, 3).")
+    p.add_argument("--in_fif", type=str, default=None, required=False, help="Explicit path to input FIF (overrides auto-discovery).")
+    p.add_argument("--prefer", type=str, default="any", choices=["any", "digFiltered", "raw"], help="Preference if multiple FIFs match.")
+    p.add_argument("--erm_fif", type=str, default=None, required=False, help="Explicit path to ERM FIF (overrides auto-discovery).")
+    p.add_argument("--task_basename", type=str, default="{sub}_{task}_raw.fif")
     p.add_argument("--erm_basename", type=str, default="{sub}_erm_raw.fif")
     p.add_argument("--tsss_dir", type=str, default="/Users/isaant/Documents/PosDoc/Projects/tsss_params/2023")
     p.add_argument("--st_duration", type=float, default=10.0)
@@ -637,12 +841,49 @@ def _parse_args():
 
 if __name__ == "__main__":
     args = _parse_args()
+
+    # Resolve task label (preferred: --task, fallback: --resting)
+    if args.task is not None:
+        task_label = args.task
+    elif getattr(args, "resting", None) is not None:
+        task_label = args.resting
+    else:
+        raise ValueError("You must provide --task (preferred) or --resting (legacy).")
+    # Resolve input FIF
+    if args.in_fif is not None:
+        fif_path = Path(args.in_fif).expanduser().resolve()
+    else:
+        fif_path = find_meg_fif(
+            root_dir=args.root_dir,
+            subject_id=args.subject_id,
+            session=args.session,
+            task=task_label,
+            run=args.run,
+            prefer=args.prefer,
+        )
+
+    print(f"Input FIF: {fif_path}")
+
+    # Resolve ERM FIF
+    if args.erm_fif is not None:
+        erm_path = Path(args.erm_fif).expanduser().resolve()
+    else:
+        erm_path = find_erm_fif(
+            root_dir=args.root_dir,
+            subject_id=args.subject_id,
+            session=args.session,
+        )
+
+    print(f"ERM FIF: {erm_path}")
+
     preprocess_subject(
         root_dir=args.root_dir,
         subject_id=args.subject_id,
         session=args.session,
-        resting=args.resting,
-        rest_basename=args.rest_basename,
+        task=task_label,
+        in_fif=str(fif_path),
+        erm_fif=str(erm_path),
+        task_basename=args.task_basename,
         erm_basename=args.erm_basename,
         tsss_dir=args.tsss_dir,
         st_duration=args.st_duration,
