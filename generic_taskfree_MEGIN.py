@@ -3,7 +3,7 @@
 """
 Generic task-free MEGIN preprocessing with ERM-SSP, tSSS, QC report, and bandwise source PSDs.
 
-Version 0.1.1 - Last modified 06/01/2026
+Version 0.1.2 - Last modified 09/01/2026
 
 Example:
     python generic_taskfree_MEGIN.py \
@@ -16,6 +16,9 @@ Example:
 
 import os
 import argparse
+from pathlib import Path
+import glob
+import re
 import matplotlib
 matplotlib.use("Agg")  # headless mode for servers
 import matplotlib.pyplot as plt
@@ -29,7 +32,6 @@ import sys
 sys.path.append(os.path.expanduser("~"))
 from mne_nanotools import preprocessing, postprocessing
 
-
 # Local file discovery helpers (supports MNE-style + BIDS-style + suffixed variants)
 # ----------------------------------------------------------
 
@@ -37,7 +39,7 @@ def find_meg_fif(root_dir: str,
                  subject_id: str,
                  session: str | None = None,
                  task: str | None = None,
-                 run: int | None = None,
+                 run: int | str | None = None,
                  prefer: str = "any") -> Path:
     """Find a single MEG FIF file for a subject/session/task.
 
@@ -52,40 +54,97 @@ def find_meg_fif(root_dir: str,
     - Some datasets omit run entirely; we try both with/without run.
     """
 
-    root = Path(root_dir).expanduser().resolve()
-    if not root.exists():
-        raise FileNotFoundError(f"root_dir not found: {root}")
+    root_in = Path(root_dir).expanduser().resolve()
+    if not root_in.exists():
+        raise FileNotFoundError(f"root_dir not found: {root_in}")
 
-    # Normalize session: allow passing 'ses-XXXX' or just 'XXXX'
+    # Normalize dataset root vs MEG root
+    # - If user passes the dataset root, MEG is usually under root/MEG
+    # - If user passes the MEG root directly, keep it
+    meg_root = root_in / "MEG" if (root_in / "MEG").exists() else root_in
+
+    # Improved session normalization
     ses_norm = None
     if session:
-        ses_norm = session if session.startswith("ses-") else f"ses-{session}"
+        # For BIDS: session may be 'ses-20241217' or '20241217'
+        if session.startswith("ses-"):
+            ses_norm = session
+        else:
+            # NVAR style often uses numeric folder names like '251017'
+            ses_norm = session
+
+    # Constrain search to MEG tree only (avoid derivatives) and to the requested session if provided.
+    search_roots: list[Path] = []
+    if ses_norm is not None:
+        # Try both NVAR-style (MEG/sub_X/251017) and BIDS-style (MEG/sub-X/ses-YYYY)
+        search_roots.append(meg_root / subject_id / ses_norm)
+        if not ses_norm.startswith("ses-"):
+            search_roots.append(meg_root / subject_id / f"ses-{ses_norm}")
+        else:
+            search_roots.append(meg_root / subject_id / ses_norm.replace("ses-", ""))
+    else:
+        search_roots.append(meg_root / subject_id)
+
+    # Keep only roots that exist
+    search_roots = [p for p in search_roots if p.exists()]
+    if not search_roots:
+        raise FileNotFoundError(
+            "No MEG search root found for the provided subject/session.\n"
+            f"  meg_root={meg_root}\n  subject_id={subject_id}\n  session={session}\n"
+        )
 
     candidates: list[Path] = []
 
+    # Normalize run so CLI can accept: 1, 01, run-1, run-01
+    def _norm_run(r):
+        if r is None:
+            return None
+        if isinstance(r, int):
+            return r
+        rs = str(r).strip()
+        rs = rs.replace("run-", "")
+        rs = rs.replace("run_", "")
+        rs = rs.lstrip("0") or "0"
+        try:
+            return int(rs)
+        except ValueError:
+            raise ValueError(f"Invalid run value: {r}. Use e.g. 1, 01, run-1, run-01")
+
+    run_int = _norm_run(run)
+
     # --- MNE-style patterns ---
     if task:
-        candidates.extend(root.rglob(f"{subject_id}_{task}_raw*.fif"))
+        for sr in search_roots:
+            candidates.extend(sr.rglob(f"{subject_id}_{task}_raw*.fif"))
 
     # --- BIDS-style patterns ---
     if ses_norm and task:
-        if run is None:
+        if run_int is None:
             run_parts = ["", "_run-*", "_run-??"]
         else:
-            r = int(run)
+            r = int(run_int)
             run_parts = [f"_run-{r}", f"_run-{r:02d}"]
 
         for run_part in run_parts:
             patt_bids = f"{subject_id}_{ses_norm}_task-{task}{run_part}_meg*.fif"
-            candidates.extend(root.rglob(patt_bids))
+            for sr in search_roots:
+                candidates.extend(sr.rglob(patt_bids))
 
     # De-duplicate and keep files only
     candidates = sorted({c.resolve() for c in candidates if c.is_file()})
 
+    # Filter out processed artifacts (we want the true input raw, not cached outputs)
+    def _is_valid_input(p: Path) -> bool:
+        n = p.name
+        bad_tokens = ["_tsss", "_filt", "_proj", "_src", "_stc", "_head_pos", "_QC_report"]
+        return not any(tok in n for tok in bad_tokens)
+
+    candidates = [c for c in candidates if _is_valid_input(c)]
+
     if not candidates:
         raise FileNotFoundError(
             "No MEG FIF found.\n"
-            f"  root_dir={root}\n  subject_id={subject_id}\n  session={session}\n  task={task}\n  run={run}\n"
+            f"  root_dir={root_in}\n  subject_id={subject_id}\n  session={session}\n  task={task}\n  run={run_int}\n"
             "Tried MNE-style and BIDS-style patterns.\n"
             "If this is BIDS, check whether run is zero-padded (run-01) or omitted.\n"
         )
@@ -93,13 +152,35 @@ def find_meg_fif(root_dir: str,
     def score(p: Path) -> int:
         name = p.name
         s = 0
-        if prefer == "digFiltered":
-            s += 10 if "digFiltered" in name else 0
-        elif prefer == "raw":
-            s += 10 if "digFiltered" not in name else 0
-        # Prefer exact '_meg.fif' over suffixed variants when ties remain
+
+        # Strong preference for matching the requested session folder, if provided
+        if ses_norm is not None:
+            if f"/{ses_norm}/" in p.as_posix():
+                s += 100
+            # also consider alternate ses- forms
+            if ses_norm.startswith("ses-") and f"/{ses_norm.replace('ses-','')}/" in p.as_posix():
+                s += 90
+            if (not ses_norm.startswith("ses-")) and f"/ses-{ses_norm}/" in p.as_posix():
+                s += 90
+
+        # Preference handling:
+        #   --prefer any  : no preference
+        #   --prefer raw  : prefer files WITHOUT extra processing suffixes like *_meg_<suffix>.fif
+        #   --prefer <token> : prefer files whose filename contains <token> (e.g., digFiltered, channels_removed)
+        if prefer and prefer != "any":
+            if prefer == "raw":
+                # Prefer "clean" BIDS names when possible (exact *_meg.fif) and avoid known processed tokens
+                if re.search(r"_meg\.fif$", name):
+                    s += 10
+                if "digFiltered" in name:
+                    s -= 2
+            else:
+                s += 10 if prefer in name else 0
+
+        # Prefer exact '_meg.fif' over suffixed variants when ties remain (BIDS)
         if re.search(r"_meg\.fif$", name):
             s += 2
+
         return s
 
     candidates = sorted(candidates, key=score, reverse=True)
@@ -123,33 +204,65 @@ def find_erm_fif(root_dir: str,
       - BIDS: sub-BRS0276_ses-20250710_task-erm_meg*.fif
     """
 
-    root = Path(root_dir).expanduser().resolve()
-    if not root.exists():
-        raise FileNotFoundError(f"root_dir not found: {root}")
+    root_in = Path(root_dir).expanduser().resolve()
+    if not root_in.exists():
+        raise FileNotFoundError(f"root_dir not found: {root_in}")
+
+    meg_root = root_in / "MEG" if (root_in / "MEG").exists() else root_in
 
     ses_norm = None
     if session:
-        ses_norm = session if session.startswith("ses-") else f"ses-{session}"
+        # For BIDS: session may be 'ses-20241217' or '20241217'
+        if session.startswith("ses-"):
+            ses_norm = session
+        else:
+            ses_norm = session
+
+    # Constrain search to MEG tree only (avoid derivatives) and to the requested session if provided.
+    search_roots: list[Path] = []
+    if ses_norm is not None:
+        search_roots.append(meg_root / subject_id / ses_norm)
+        if not ses_norm.startswith("ses-"):
+            search_roots.append(meg_root / subject_id / f"ses-{ses_norm}")
+        else:
+            search_roots.append(meg_root / subject_id / ses_norm.replace("ses-", ""))
+    else:
+        search_roots.append(meg_root / subject_id)
+
+    search_roots = [p for p in search_roots if p.exists()]
+    if not search_roots:
+        raise FileNotFoundError(
+            "No ERM search root found for the provided subject/session.\n"
+            f"  meg_root={meg_root}\n  subject_id={subject_id}\n  session={session}\n"
+        )
 
     candidates: list[Path] = []
 
     # MNE-style ERM
-    candidates.extend(root.rglob(f"{subject_id}_erm_raw*.fif"))
+    for sr in search_roots:
+        candidates.extend(sr.rglob(f"{subject_id}_erm_raw*.fif"))
 
     # BIDS-style ERM
     if ses_norm:
-        candidates.extend(root.rglob(f"{subject_id}_{ses_norm}_task-erm*_meg*.fif"))
+        for sr in search_roots:
+            candidates.extend(sr.rglob(f"{subject_id}_{ses_norm}_task-erm*_meg*.fif"))
 
     candidates = sorted({c.resolve() for c in candidates if c.is_file()})
+
+    # Remove cached tSSS/filt/proj outputs
+    candidates = [c for c in candidates if "_tsss" not in c.name and "_filt" not in c.name and "_proj" not in c.name]
 
     if not candidates:
         raise FileNotFoundError(
             "No ERM FIF found.\n"
-            f"  root_dir={root}\n  subject_id={subject_id}\n  session={session}\n"
+            f"  root_dir={root_in}\n  subject_id={subject_id}\n  session={session}\n"
             "Tried MNE-style and BIDS-style ERM patterns.\n"
         )
 
-    candidates = sorted(candidates, key=lambda p: (len(p.name), p.name))
+    if ses_norm is not None:
+        candidates = sorted(candidates, key=lambda p: (0 if f"/{ses_norm}/" in p.as_posix() else 1, len(p.name), p.name))
+    else:
+        candidates = sorted(candidates, key=lambda p: (len(p.name), p.name))
 
     if len(candidates) > 1:
         print("Multiple ERM candidates found. Using best match:")
@@ -805,9 +918,11 @@ def _parse_args():
     p.add_argument("--session", default=None, required=False, help="Session (e.g., 20241217 or ses-20241217). Optional for MNE-style naming.")
     p.add_argument("--resting", default='rest1', required=False, help="Backward-compatible alias for --task (e.g., rest1/rest2).")
     p.add_argument("--task", default=None, required=False, help="Generic task name. Examples: rest, msit, somatoauditory1, rest1.")
-    p.add_argument("--run", type=int, default=None, required=False, help="BIDS run number (e.g., 1, 2, 3).")
+    p.add_argument("--run", type=str, default=None, required=False,
+                   help="BIDS run identifier. Accepts: 1, 01, run-1, run-01.")
     p.add_argument("--in_fif", type=str, default=None, required=False, help="Explicit path to input FIF (overrides auto-discovery).")
-    p.add_argument("--prefer", type=str, default="any", choices=["any", "digFiltered", "raw"], help="Preference if multiple FIFs match.")
+    p.add_argument("--prefer", type=str, default="any",
+                   help="Preference token when multiple FIFs match: 'any', 'raw', or any substring to prefer (e.g., digFiltered, channels_removed).")
     p.add_argument("--erm_fif", type=str, default=None, required=False, help="Explicit path to ERM FIF (overrides auto-discovery).")
     p.add_argument("--task_basename", type=str, default="{sub}_{task}_raw.fif")
     p.add_argument("--erm_basename", type=str, default="{sub}_erm_raw.fif")
