@@ -31,7 +31,7 @@ def read_data(fname):
         print(f"→ Reading FIF file: {fname}")
         raw = mne.io.read_raw_fif(fname, preload=True)
     elif fname.endswith('.ds') and os.path.isdir(fname):
-        print(f"→ Reading CTF/MEGIN .ds directory: {fname}")
+        print(f"→ Reading CTF .ds directory: {fname}")
         raw = mne.io.read_raw_ctf(fname, system_clock='ignore', preload=True)
     else:
         raise ValueError(f"Unsupported file type: {fname}. Expected .fif or .ds")
