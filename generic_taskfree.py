@@ -335,7 +335,9 @@ def preprocess_subject(
     root_dir: str,
     subject_id: str,
     session: str | None = None,
+    suffix : str | None = None,
     task: str = 'rest1',
+    trans: str = '-corr_trans.fif',
     in_file: str | None = None,
     erm_file: str | None = None,
     task_basename: str = "{sub}_{task}_raw",
@@ -395,7 +397,8 @@ def preprocess_subject(
     # ---- Directory setup ----
     subject = subject_id
     parent_path = os.path.abspath(root_dir)
-    fs_dir = os.path.join(parent_path, subjects_dir_name)   # /MRI/freesurfer/sub-XX
+    fs_dir = os.path.join(parent_path, subjects_dir_name)
+    fs_subject = subject_id+"_"+suffix if suffix else subject_id# /MRI/freesurfer/sub-XX
     if session is None:
         meg_dir = os.path.join(root_dir, "MEG", subject_id)
         deriv_dir = os.path.join(parent_path, "derivatives", subject_id)    # /derivatives/sub-XX
@@ -711,8 +714,8 @@ def preprocess_subject(
     # ---- Coregistration metrics + report visualization ----
     print("→ Coregistration")
 
-    trans_path = os.path.join(meg_dir, f"{subject}-{session}-corr_trans.fif")
-    trans_path = trans_path if os.path.isfile(trans_path) else os.path.join(meg_dir, f"{subject}_{session}-corr_trans.fif")
+    trans_path = os.path.join(meg_dir, f"{subject}-{session}{trans}")
+    trans_path = trans_path if os.path.isfile(trans_path) else os.path.join(meg_dir, f"{subject}_{session}{trans}")
        
 
     if os.path.exists(trans_path):
@@ -720,40 +723,37 @@ def preprocess_subject(
         trans = mne.read_trans(trans_path)
 
         # Compute dig → MRI distances
-        distances = mne.dig_mri_distances(
-            info=raw.info,
-            trans=trans,
-            subject=subject,
-            subjects_dir=fs_dir
-        )
+        # distances = mne.dig_mri_distances( info=raw.info, trans=trans, subject=fs_subject,subjects_dir=fs_dir)
 
-        mean_distance_mm = np.mean(distances) * 1000
-        std_distance_mm  = np.std(distances)  * 1000
+        #mean_distance_mm = np.mean(distances) * 1000
+        #std_distance_mm  = np.std(distances)  * 1000
 
         #note = f"Distance: {mean_distance_mm:.2f} +- {std_distance_mm:.2f} mm"
 
         report.add_trans(
             trans=trans_path,
             info=raw.info,
-            subject=subject,
+            subject=fs_subject,
             subjects_dir=fs_dir,
             plot_kwargs=dict(surfaces='head-dense',
             mri_fiducials=True, meg={"helmet": 0.1, "sensors": 0.1, "ref": 1}),
             title='Coregistration',
             alpha=1
         )
+
     else:
         print(f"⚠️ Missing trans file: {trans_path}")
+    
 
     # ---- BEM ----
-    bem_path = os.path.join(fs_dir, subject, "bem", f"{subject}-5120-5120-5120-bem-sol.fif")
+    bem_path = os.path.join(fs_dir, fs_subject, "bem", f"{subject}-5120-5120-5120-bem-sol.fif")
     bem_dir = os.path.join(fs_dir, "bem")
     src_path = os.path.join(deriv_dir, Path(os.path.basename(path2raw)).stem + "_src.fif")
 
     if compute_bem_if_missing and not os.path.exists(bem_path):
         os.makedirs(bem_dir, exist_ok=True)
         conductivity = (0.3,)   # Single layer for MEG
-        model = mne.make_bem_model(subject=subject, ico=4, #The surface ico downsampling to use, e.g. 5=20484, 4=5120, 3=1280. If None, no subsampling is applied.
+        model = mne.make_bem_model(subject=fs_subject, ico=4, #The surface ico downsampling to use, e.g. 5=20484, 4=5120, 3=1280. If None, no subsampling is applied.
                             conductivity=conductivity, 
                             subjects_dir=fs_dir) #bem conductivity model
         bem_sol = mne.make_bem_solution(model)
@@ -761,15 +761,15 @@ def preprocess_subject(
         if bem_watershed:
             print("→ Creating watershed BEM (if missing)...")
             try:
-                mne.bem.make_watershed_bem(subject=subject, subjects_dir=fs_dir, overwrite=True)
-                mne.bem.make_scalp_surfaces(subject=subject, subjects_dir=fs_dir, overwrite=True) #Creates the high resolution -head-dense.fif
+                mne.bem.make_watershed_bem(subject=fs_subject, subjects_dir=fs_dir, overwrite=True)
+                mne.bem.make_scalp_surfaces(subject=fs_subject, subjects_dir=fs_dir, overwrite=True) #Creates the high resolution -head-dense.fif
 
             except Exception as e:
                 print(f"⚠️ Watershed BEM failed: {e}")
 
     if not os.path.exists(src_path):
         print("→ Setting up source space...")
-        src = mne.setup_source_space(subject=subject, subjects_dir=fs_dir, add_dist="patch")
+        src = mne.setup_source_space(subject=fs_subject, subjects_dir=fs_dir, add_dist="patch")
         src.save(src_path, overwrite=True)
     else:
         src = mne.read_source_spaces(src_path)
@@ -777,12 +777,12 @@ def preprocess_subject(
     # ---- BEM / alignment QC ----
     try:
         # Plot BEM (2D slices)
-        fig = mne.viz.plot_bem(subject=subject, subjects_dir=fs_dir, src=src)
+        fig = mne.viz.plot_bem(subject=fs_subject, subjects_dir=fs_dir, src=src)
         report.add_figure(fig, title="Sources on BEM")
 
         # Plot 3D alignment (no 'show' kwarg)
         fig = mne.viz.plot_alignment(
-            subject=subject,
+            subject=fs_subject,
             subjects_dir=fs_dir,
             surfaces="white", #white becuase mne use white for sourse reconstruction? 
             coord_frame="mri",
@@ -886,6 +886,7 @@ def preprocess_subject(
 
                 stc = mne.beamformer.apply_lcmv_raw(raw, filters,
                                                     start=start, stop=stop)
+                
 
                 try:
                     stc.save(stc_path, overwrite=True)
@@ -916,7 +917,7 @@ def preprocess_subject(
 
         surfer_kwargs = dict(surface='pial',
                         hemi='split',
-                        subject=subject, 
+                        subject=fs_subject, 
                         subjects_dir=fs_dir,
                         #views="medial",
                         colormap='jet',
@@ -933,7 +934,7 @@ def preprocess_subject(
             surfer_kwargs['hemi']='split'
             # SourceEstimate per band
             stc_band = mne.SourceEstimate(power, vertices=stc.vertices,
-                                          tmin=0, tstep=.25, subject=subject)
+                                          tmin=0, tstep=.25, subject=fs_subject)
 
             # stc_band_morph = morph.apply(stc_band)
             clim = dict(kind="value", lims=[.0* max(power), 0.4 * max(power), .8 * max(power)])
@@ -999,8 +1000,10 @@ def _parse_args():
     p.add_argument("--root_dir", required=True, type=str)
     p.add_argument("--subject_id", required=True, type=str)
     p.add_argument("--session", default=None, required=False, help="Session (e.g., 20241217 or ses-20241217). Optional for MNE-style naming.")
+    p.add_argument("--suffix", type=str, default=None, help="Optional FreeSurfer subject suffix (e.g., 'ses-01_run-2' for multiple T1w runs.")
     p.add_argument("--resting", default='rest1', required=False, help="Backward-compatible alias for --task (e.g., rest1/rest2).")
     p.add_argument("--task", default=None, required=False, help="Generic task name. Examples: rest, msit, somatoauditory1, rest1.")
+    p.add_argument("--trans", type= str, default='-corr_trans.fif', required=False, help="Generic corregistration file sufix. Examples: -corr_trans.fif, _hsp_ready.fif")
     p.add_argument("--run", type=str, default=None, required=False,
                    help="BIDS run identifier. Accepts: 1, 01, run-1, run-01.")
     p.add_argument("--in_file", type=str, default=None, required=False, help="Explicit path to input FIF (overrides auto-discovery).")
@@ -1081,7 +1084,9 @@ if __name__ == "__main__":
         root_dir=args.root_dir,
         subject_id=args.subject_id,
         session=args.session,
+        suffix=args.suffix,
         task=task_label,
+        trans=args.trans,
         in_file=str(file_path),
         erm_file=str(erm_path),
         task_basename=args.task_basename,
