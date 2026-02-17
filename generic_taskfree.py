@@ -188,7 +188,7 @@ def find_meg(root_dir: str,
                 # Prefer "clean" BIDS names when possible (exact *_meg.ext) and avoid known processed tokens
                 if re.search(rf"_meg{ext_re}$", name):
                     s += 10
-                if "digFiltered" in name:
+                else:
                     s -= 2
             else:
                 s += 10 if prefer in name else 0
@@ -1008,7 +1008,7 @@ def _parse_args():
                    help="BIDS run identifier. Accepts: 1, 01, run-1, run-01.")
     p.add_argument("--in_file", type=str, default=None, required=False, help="Explicit path to input FIF (overrides auto-discovery).")
     p.add_argument("--prefer", type=str, default="any",
-                   help="Preference token when multiple FIFs match: 'any', 'raw', or any substring to prefer (e.g., digFiltered, channels_removed).")
+                   help="Preference token when multiple match: 'any', 'raw', or any substring to prefer (e.g., digFiltered, channels_removed).")
     p.add_argument("--erm_file", type=str, default=None, required=False, help="Explicit path to ERM FIF (overrides auto-discovery).")
     p.add_argument("--system", type=str, default="MEGIN", choices=["MEGIN", "CTF"], help="Acquisition system. Controls file extensions and tSSS application.")
     p.add_argument("--task_basename", type=str, default="{sub}_{task}_raw.fif")
