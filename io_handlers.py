@@ -88,6 +88,11 @@ def extract_bids_session(path: str, fallback=None) -> str:
     m = re.search(r"(ses-[^_/]+)", path)
     return m.group(1) if m else fallback
 
+def extract_bids_id(path: str, fallback=None) -> str:
+    m = re.search(r"(sub-[^_]+_ses-[^_]+_run-[^_]+)", path)
+    return m.group(1) if m else fallback
+    
+
 
 def fiff_ident_from_label(label: str):
     label = label.upper()

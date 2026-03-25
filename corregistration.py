@@ -25,7 +25,6 @@ from mne.io.constants import FIFF
 from datetime import datetime
 
 
-
 sys.path.append(os.path.expanduser("~"))
 from nanotools import preprocessing, io_handlers
 
@@ -38,7 +37,8 @@ def open_coregistration_gui(root_dir,
                             system,
                             mri_fiducials,
                             json,
-                            automated):
+                            automated,
+                            overwrite):
     """
     Open the MNE coregistration GUI for a given subject.
 
@@ -68,8 +68,11 @@ def open_coregistration_gui(root_dir,
     root_dir = os.path.abspath(root_dir)
     log_dir = os.path.join(root_dir, "logs")
     os.makedirs(log_dir, exist_ok=True)
+    # initialize log file
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = os.path.join(log_dir, f"corregistration_{subject_id}_{timestamp}.txt")
+    
     fs_dir = os.path.join(root_dir, subjects_dir_name)
-    fs_subject = subject_id+"_"+suffix if suffix else subject_id
     system_upper = system.upper()
     
     if automated == True:
@@ -94,13 +97,66 @@ def open_coregistration_gui(root_dir,
         if f.endswith(meg_ext) and ("raw" in f or "meg" in f)
     ]
     trans_found = [f for f in os.listdir(meg_dir) if f.endswith("-corr_trans.fif")]
-    bem_path = os.path.join(fs_dir, fs_subject, "bem", f"{fs_subject}-5120-5120-5120-bem-sol.fif")
-    bem_dir = os.path.join(fs_dir, fs_subject, "bem")
-    fiduacials_file = os.path.join(bem_dir,f'{fs_subject}-fiducials.fif')
-    
-    if trans_found:
+    if trans_found and overwrite==False:
         print(f"Found existing file: {trans_found[0]}. Skipping... \n")
         sys.exit()
+
+    head_fid = None
+    if json:
+        try:
+            head_coordinate_file = os.path.join(meg_dir, f"{subject_id}_{session}_coordsystem.json")
+            head_coordinates = io_handlers.load_json(head_coordinate_file)
+            head_fid = head_coordinates['AnatomicalLandmarkCoordinates']
+            intended = io_handlers.strip_bids_prefix(head_coordinates["IntendedFor"])
+            mri_basename = io_handlers.strip_nii_suffix(os.path.basename(intended))
+            fs_subject = io_handlers.extract_bids_id(mri_basename)
+            bem_path = os.path.join(fs_dir, fs_subject, "bem", f"{fs_subject}-5120-5120-5120-bem-sol.fif")
+            bem_dir = os.path.join(fs_dir, fs_subject, "bem")
+            fiducials_file = os.path.join(bem_dir,f'{fs_subject}-fiducials.fif')
+            ses = io_handlers.extract_bids_session(intended, session)
+    
+            anat_folder = os.path.join(root_dir, "MEG", subject_id, ses,"anat")
+            t1_nii = os.path.join(anat_folder, f"{mri_basename}.nii.gz")
+            t1_json = os.path.join(anat_folder, f"{mri_basename}.json")
+    
+            lm = io_handlers.load_json(t1_json)["AnatomicalLandmarkCoordinates"]
+    
+            img = nib.load(t1_nii)
+            scannerRAS_to_tkrRAS = io_handlers.scannerRAS_to_tkrRAS_matrix(os.path.join(fs_dir, fs_subject, "mri", "T1.mgz"))
+    
+            pts = []
+            for fid in ("NAS", "LPA", "RPA"):
+                ident = io_handlers.fiff_ident_from_label(fid)
+                if ident is None or fid not in lm:
+                    continue
+    
+                ijk = np.array(lm[fid], float)
+                ras_tkr_mm = io_handlers.nifti_ijk_to_tkrRAS(ijk, img.affine, scannerRAS_to_tkrRAS)/1000
+    
+                pts.append(dict(r=ras_tkr_mm, ident=ident,kind=FIFF.FIFFV_POINT_CARDINAL,))
+                
+            mne.io.write_fiducials(fiducials_file, pts, coord_frame="mri", overwrite=True)
+    
+        except Exception as e:
+            print(f"⚠️ Fiducial construction failed: {e} \n")
+            # ---- Write error to txt ----
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            with open(log_file, "w") as f:
+                f.write("⚠️ Fiducial construction failed\n")
+                f.write(f"Timestamp: {timestamp}\n\n")
+                f.write("Error message:\n")
+                f.write(str(e) + "\n\n")
+                f.write("Traceback:\n")
+                f.write(traceback.format_exc())
+             
+            sys.exit(1)
+    
+    else:
+        fs_subject = f"{subject_id}_{suffix}" if suffix else subject_id
+        bem_path = os.path.join(fs_dir, fs_subject, "bem", f"{fs_subject}-5120-5120-5120-bem-sol.fif")
+        bem_dir = os.path.join(fs_dir, fs_subject, "bem")
+        fiducials_file = os.path.join(bem_dir,f'{fs_subject}-fiducials.fif')
+
     
     if compute_bem_if_missing and not os.path.exists(bem_path):
         print("→ Creating watershed BEM (if missing)...")
@@ -111,7 +167,17 @@ def open_coregistration_gui(root_dir,
                 make_watershed_bem(subject=fs_subject, subjects_dir=fs_dir, overwrite=True) #if not found, create BEM surfaces using the FreeSurfer watershed algorithm (T1w images)
                 make_scalp_surfaces(subject=fs_subject, subjects_dir=fs_dir, overwrite=True) #Creates the high resolution -head-dense.fif
         except Exception as e:
-            print(f"⚠️ BEM failed: {e}")
+            print(f"⚠️ BEM failed: {e} \n")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            with open(log_file, "w") as f:
+                print(f"⚠️ BEM failed: \n")
+                f.write("Error message:\n")
+                f.write(str(e) + "\n\n")
+                f.write("Traceback:\n")
+                f.write(traceback.format_exc())
+             
+            print(f"Error log written to: {log_file}")
+            
 
         try:    
             os.makedirs(bem_dir, exist_ok=True)
@@ -124,7 +190,16 @@ def open_coregistration_gui(root_dir,
             
        
         except Exception as e:
-            print(f"⚠️ Watershed BEM failed: {e}")
+            print(f"⚠️ Watershed BEM failed: {e} \n")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            with open(log_file, "w") as f:
+                print(f"⚠️ Watershed BEM failed: \n")
+                f.write("Error message:\n")
+                f.write(str(e) + "\n\n")
+                f.write("Traceback:\n")
+                f.write(traceback.format_exc())
+             
+            print(f"Error log written to: {log_file}")
     
     
 
@@ -173,9 +248,9 @@ def open_coregistration_gui(root_dir,
             )
             
         coord_frame = 'mri'
-        mne.io.write_fiducials(fiduacials_file , pts, coord_frame=coord_frame, overwrite=True)
+        mne.io.write_fiducials(fiducials_file , pts, coord_frame=coord_frame, overwrite=True)
 
-        print(f"\n→ Fiducials written to {fiduacials_file}")
+        print(f"\n→ Fiducials written to {fiducials_file}")
 
     # ===============================================================================================
 
@@ -184,56 +259,6 @@ def open_coregistration_gui(root_dir,
 
     # ===============================================================================================
     
-    head_fid = None
-    if json:
-        try:
-            head_coordinate_file = os.path.join(meg_dir, f"{subject_id}_{session}_coordsystem.json")
-            head_coordinates = io_handlers.load_json(head_coordinate_file)
-            head_fid = head_coordinates['AnatomicalLandmarkCoordinates']
-            intended = io_handlers.strip_bids_prefix(head_coordinates["IntendedFor"])
-            mri_basename = io_handlers.strip_nii_suffix(os.path.basename(intended))
-            ses = io_handlers.extract_bids_session(intended, session)
-    
-            anat_folder = os.path.join(root_dir, "MEG", subject_id, ses,"anat")
-            t1_nii = os.path.join(anat_folder, f"{mri_basename}.nii.gz")
-            t1_json = os.path.join(anat_folder, f"{mri_basename}.json")
-    
-            lm = io_handlers.load_json(t1_json)["AnatomicalLandmarkCoordinates"]
-    
-            img = nib.load(t1_nii)
-            scannerRAS_to_tkrRAS = io_handlers.scannerRAS_to_tkrRAS_matrix(os.path.join(fs_dir, fs_subject, "mri", "T1.mgz"))
-    
-            pts = []
-            for fid in ("NAS", "LPA", "RPA"):
-                ident = io_handlers.fiff_ident_from_label(fid)
-                if ident is None or fid not in lm:
-                    continue
-    
-                ijk = np.array(lm[fid], float)
-                ras_tkr_mm = io_handlers.nifti_ijk_to_tkrRAS(ijk, img.affine, scannerRAS_to_tkrRAS)/1000
-    
-                pts.append(dict(r=ras_tkr_mm, ident=ident,kind=FIFF.FIFFV_POINT_CARDINAL,))
-                
-            mne.io.write_fiducials(fiduacials_file, pts, coord_frame="mri", overwrite=True)
-    
-        except Exception as e:
-            print(f"\n⚠️ Fiducial construction failed: {e}")
-
-            # ---- Write error to txt ----
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            log_file = os.path.join(log_dir, f"fiducials_error_{timestamp}.txt")
-             
-            with open(log_file, "w") as f:
-                f.write("Fiducial construction failed\n")
-                f.write(f"Timestamp: {timestamp}\n\n")
-                f.write("Error message:\n")
-                f.write(str(e) + "\n\n")
-                f.write("Traceback:\n")
-                f.write(traceback.format_exc())
-             
-            print(f"Error log written to: {log_file}")
-             
-            sys.exit(1)
     
         
     if system_upper == "CTF":
@@ -310,7 +335,7 @@ def open_coregistration_gui(root_dir,
         raw.save(out_fif, overwrite=True)
         raw_path = out_fif
     
-    if automated and os.path.exists(fiduacials_file):
+    if automated and os.path.exists(fiducials_file):
         # Launch automated coregistration
         info = mne.io.read_info(raw_path)
         coreg = mne.coreg.Coregistration(info = info,
@@ -319,7 +344,7 @@ def open_coregistration_gui(root_dir,
                                          fiducials='auto',
                                          on_defects='raise')
         coreg.fit_fiducials(verbose=True)
-        mne.write_trans(f"{meg_dir}/{subject_id}_{session}-corr_trans.fif",coreg.trans)
+        mne.write_trans(f"{meg_dir}/{subject_id}_{session}-corr_trans.fif",coreg.trans, overwrite=overwrite)
 
     else:
         # Launch GUI
@@ -348,7 +373,8 @@ def _parse_args():
                    help="MEG system; sets expected raw extension (.fif for MEGIN, .ds for CTF) and TSSS handling.")
     p.add_argument("--mri_fiducials", type=dict, default=None, help="Dictionary with the landmark coordinates in the freesurfer (tkrRAS(mm)) mri space.")
     p.add_argument("--json", action="store_true", help="Commonly shared with open datasets with dephased MRI;  If True, will look for '_coordsystem.json' and '_T1w.json' for mri (world (mm)) and head landmark coordinates.")
-    p.add_argument("--automated", action="store_true", help="Coregistration refinement will be done automatically if True; (-fiducials.fif must exist)")
+    p.add_argument("--automated", action="store_true", help="Coregistration refinement will be done automatically if True; (-fiducials.fif must exist)"),
+    p.add_argument("--overwrite", action="store_true", help="Overwrites corr_trans if it exists")
     return p.parse_args()
 
 
@@ -365,4 +391,5 @@ if __name__ == "__main__":
         mri_fiducials=args.mri_fiducials,
         json=args.json,               # <-- THIS
         automated=args.automated,
+        overwrite=args.overwrite
     )

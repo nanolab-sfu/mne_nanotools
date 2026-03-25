@@ -26,6 +26,8 @@ import mne
 import numpy as np
 from importlib import reload
 from mne.report import Report
+from datetime import datetime
+import traceback
 
 # ---- custom user modules ----
 import sys
@@ -366,6 +368,7 @@ def preprocess_subject(
     num_proj: tuple = (1,1), # ECG and EOG proj
     verbose: bool = False,
     system: str = "MEGIN",
+    json: bool = False,
 ):
     """
     Generic preprocessing pipeline for MEGIN/CTF resting-state data:
@@ -397,8 +400,14 @@ def preprocess_subject(
     # ---- Directory setup ----
     subject = subject_id
     parent_path = os.path.abspath(root_dir)
+    log_dir = os.path.join(root_dir, "logs")
+    os.makedirs(log_dir, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = os.path.join(log_dir, f"generic_taskfree_{subject_id}_{timestamp}.txt")
+
     fs_dir = os.path.join(parent_path, subjects_dir_name)
-    fs_subject = subject_id+"_"+suffix if suffix else subject_id# /MRI/freesurfer/sub-XX
+
     if session is None:
         meg_dir = os.path.join(root_dir, "MEG", subject_id)
         deriv_dir = os.path.join(parent_path, "derivatives", subject_id)    # /derivatives/sub-XX
@@ -409,6 +418,31 @@ def preprocess_subject(
     # Support BIDS-style nested layout: .../MEG/sub-XX/ses-YYYY/meg
     meg_nested = os.path.join(meg_dir, "meg")
     meg_dir = meg_nested if os.path.isdir(meg_nested) else meg_dir
+
+    if json:
+        try:
+            head_coordinate_file = os.path.join(meg_dir, f"{subject_id}_{session}_coordsystem.json")
+            head_coordinates = io_handlers.load_json(head_coordinate_file)
+            intended = io_handlers.strip_bids_prefix(head_coordinates["IntendedFor"])
+            mri_basename = io_handlers.strip_nii_suffix(os.path.basename(intended))
+            fs_subject = io_handlers.extract_bids_id(mri_basename)
+            print("→ .json file was specified. following the path to subjects surface...")
+
+        except Exception as e:
+            # ---- Write error to txt ----
+            print(f"⚠️ Could not find .json file: {e}. System will exit")
+            
+            with open(log_file, "w") as f:
+                f.write("No .json file found\n")
+                f.write(f"Timestamp: {timestamp}\n\n")
+                f.write("Error message:\n")
+                f.write(str(e) + "\n\n")
+                f.write("Traceback:\n")
+                f.write(traceback.format_exc())
+
+            sys.exit(1)
+    else:
+            fs_subject = f"{subject_id}_{suffix}" if suffix and not json else subject_id# /MRI/freesurfer/sub-XX
 
 
     os.makedirs(deriv_dir, exist_ok=True)
@@ -485,6 +519,15 @@ def preprocess_subject(
             print(f"⚠️ Could not read head_pos from {head_pos_path}: {e}, it will be computed now")
             head_pos = preprocessing.compute_head_position(raw)
             mne.chpi.write_head_pos(head_pos_path, head_pos)
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            with open(log_file, "w") as f:
+                f.write(f"⚠️ Could not read head_pos from {head_pos_path}. it was computed\n")
+                f.write(f"Timestamp: {timestamp}\n\n")
+                f.write("Error message:\n")
+                f.write(str(e) + "\n\n")
+                f.write("Traceback:\n")
+                f.write(traceback.format_exc())
     else:
         head_pos = None
         raw.set_channel_types({"HEOG": "eog", "VEOG": "eog", "ECG": "ecg"})
@@ -566,11 +609,31 @@ def preprocess_subject(
         raw.crop(tmin=crop_tmin[1], tmax=crop_tmax[1])
     except Exception as e:
         print(f"⚠️ Raw cropping failed: {e}")
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        with open(log_file, "w") as f:
+            f.write("⚠️ Raw cropping failed: \n")
+            f.write(f"Timestamp: {timestamp}\n\n")
+            f.write("Error message:\n")
+            f.write(str(e) + "\n\n")
+            f.write("Traceback:\n")
+            f.write(traceback.format_exc())
         
     try:
         raw_erm.crop(tmin=crop_tmin[0], tmax=crop_tmax[0])
     except Exception as e:
         print(f"⚠️ Empty room cropping failed: {e}")
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        with open(log_file, "w") as f:
+            f.write("⚠️ Empty room cropping failed: \n")
+            f.write(f"Timestamp: {timestamp}\n\n")
+            f.write("Error message:\n")
+            f.write(str(e) + "\n\n")
+            f.write("Traceback:\n")
+            f.write(traceback.format_exc())
+
+
 
     # ---- Filtering & notch ----
     print(f"→ Filtering {l_freq}-{h_freq} Hz, notch {line_freqs}")
@@ -604,12 +667,31 @@ def preprocess_subject(
         report.add_figure(fig, title="ECG events")
     except Exception as e:
         print(f"⚠️ ECG QC failed: {e}")
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        with open(log_file, "w") as f:
+            f.write("⚠️ ECQ QC failed: \n")
+            f.write(f"Timestamp: {timestamp}\n\n")
+            f.write("Error message:\n")
+            f.write(str(e) + "\n\n")
+            f.write("Traceback:\n")
+            f.write(traceback.format_exc())
     try:
         eog_ev = mne.preprocessing.create_eog_epochs(raw, ch_name=eog_ch).average()
         fig = eog_ev.plot_joint(show=False)
         report.add_figure(fig, title="EOG events")
+    
     except Exception as e:
         print(f"⚠️ EOG QC failed: {e}")
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        with open(log_file, "w") as f:
+            f.write("⚠️ EOC QC failed \n")
+            f.write(f"Timestamp: {timestamp}\n\n")
+            f.write("Error message:\n")
+            f.write(str(e) + "\n\n")
+            f.write("Traceback:\n")
+            f.write(traceback.format_exc())
 
     
     # ---- ERM-based SSP ----
@@ -651,6 +733,14 @@ def preprocess_subject(
     except Exception as e:
         print(f"⚠️ SSP computation failed: {e}")
 
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        with open(log_file, "w") as f:
+            f.write("⚠️ SSP computation failed: \n")
+            f.write(f"Timestamp: {timestamp}\n\n")
+            f.write("Error message:\n")
+            f.write(str(e) + "\n\n")
+            f.write("Traceback:\n")
+            f.write(traceback.format_exc())
 
     # --- Amplitude and gradient thresholds ----
     try:
@@ -692,7 +782,15 @@ def preprocess_subject(
     
     except Exception as e:
         print(f"⚠️ MAD failed: {e}")
-    
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        with open(log_file, "w") as f:
+            f.write("⚠️ MAD failed: \n")
+            f.write(f"Timestamp: {timestamp}\n\n")
+            f.write("Error message:\n")
+            f.write(str(e) + "\n\n")
+            f.write("Traceback:\n")
+            f.write(traceback.format_exc())
 
     # ---- Data and noise covariance ----
     print("→ Data and noise covariance")
@@ -767,6 +865,15 @@ def preprocess_subject(
             except Exception as e:
                 print(f"⚠️ Watershed BEM failed: {e}")
 
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                with open(log_file, "w") as f:
+                    f.write("⚠️ Watershed BEM failed: \n")
+                    f.write(f"Timestamp: {timestamp}\n\n")
+                    f.write("Error message:\n")
+                    f.write(str(e) + "\n\n")
+                    f.write("Traceback:\n")
+                    f.write(traceback.format_exc())
+
     if not os.path.exists(src_path):
         print("→ Setting up source space...")
         src = mne.setup_source_space(subject=fs_subject, subjects_dir=fs_dir, add_dist="patch")
@@ -799,6 +906,15 @@ def preprocess_subject(
     except Exception as e:
         print(f"⚠️ BEM/alignment plots failed: {e}")
 
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        with open(log_file, "w") as f:
+            f.write("⚠️ BEM/alignment plots failed: \n")
+            f.write(f"Timestamp: {timestamp}\n\n")
+            f.write("Error message:\n")
+            f.write(str(e) + "\n\n")
+            f.write("Traceback:\n")
+            f.write(traceback.format_exc())
+
     # ---- Forward ----
 
     try:
@@ -809,6 +925,15 @@ def preprocess_subject(
 
     except Exception as e:
         print(f"⚠️ Foward solution failed: {e}")
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        with open(log_file, "w") as f:
+            f.write("⚠️ Forward solution failed: \n")
+            f.write(f"Timestamp: {timestamp}\n\n")
+            f.write("Error message:\n")
+            f.write(str(e) + "\n\n")
+            f.write("Traceback:\n")
+            f.write(traceback.format_exc())
 
     # ---- Inverse ----
 
@@ -862,6 +987,15 @@ def preprocess_subject(
                 except Exception as e:
                     print(f"⚠️ Could not save STC: {e}")
 
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    with open(log_file, "w") as f:
+                        f.write("⚠️ Could not save STC: \n")
+                        f.write(f"Timestamp: {timestamp}\n\n")
+                        f.write("Error message:\n")
+                        f.write(str(e) + "\n\n")
+                        f.write("Traceback:\n")
+                        f.write(traceback.format_exc())
+
             else:
                 print(f"→ Reading existing STC ({inv_method})...")
                 stc = mne.read_source_estimate(stc_path)
@@ -893,6 +1027,15 @@ def preprocess_subject(
                     print(f"→ STC saved at {stc_path}")
                 except Exception as e:
                     print(f"⚠️ Could not save STC: {e}")
+
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    with open(log_file, "w") as f:
+                        f.write("⚠️ Could not save STC: \n")
+                        f.write(f"Timestamp: {timestamp}\n\n")
+                        f.write("Error message:\n")
+                        f.write(str(e) + "\n\n")
+                        f.write("Traceback:\n")
+                        f.write(traceback.format_exc())
 
             else:
                 print("→ Reading Beamformer STC...")
@@ -1038,6 +1181,7 @@ def _parse_args():
     # additional_bads como lista
     p.add_argument("--additional_bads", type=str, nargs="*", default=[])
     p.add_argument("--verbose", action="store_true", help="Enable verbose MNE output")
+    p.add_argument("--json", action = "store_true", help="Only true if .json file with fidutials exists AND was use to generete the coregistation automatically")
     return p.parse_args()
 
 
@@ -1114,4 +1258,5 @@ if __name__ == "__main__":
         num_proj=args.num_proj,
         verbose=args.verbose,
         system=args.system,
+        json=args.json,
     )
