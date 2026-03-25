@@ -442,7 +442,7 @@ def preprocess_subject(
 
             sys.exit(1)
     else:
-            fs_subject = f"{subject_id}_{suffix}" if suffix and not json else subject_id# /MRI/freesurfer/sub-XX
+            fs_subject = f"{subject_id}_{suffix}" if suffix else subject_id# /MRI/freesurfer/sub-XX
 
 
     os.makedirs(deriv_dir, exist_ok=True)

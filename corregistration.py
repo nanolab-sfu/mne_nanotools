@@ -93,9 +93,15 @@ def open_coregistration_gui(root_dir,
     meg_dir = meg_nested if os.path.isdir(meg_nested) else meg_dir
 
     meg_files = [
-        f for f in os.listdir(meg_dir)
-        if f.endswith(meg_ext) and ("raw" in f or "meg" in f)
+    f for f in os.listdir(meg_dir)
+    if (
+        f.endswith(meg_ext)
+        and ("raw" in f or "meg" in f)
+        and "noise" not in f.lower()
+        and "erm" not in f.lower()
+    )
     ]
+    
     trans_found = [f for f in os.listdir(meg_dir) if f.endswith("-corr_trans.fif")]
     if trans_found and overwrite==False:
         print(f"Found existing file: {trans_found[0]}. Skipping... \n")
