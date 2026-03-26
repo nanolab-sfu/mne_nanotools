@@ -352,7 +352,7 @@ def preprocess_subject(
     line_freqs: tuple = (60, 120, 180),
     downsample: int = 500,
     crop_tmin: tuple = (10, 10),
-    crop_tmax: tuple = (190, 250),
+    crop_tmax: tuple = (110, 250),
     ecg_ch: str = "ECG003",
     eog_ch: str = ["EOG001", "EOG002"],
     reject_mag: float = 4e-12,
@@ -1163,7 +1163,7 @@ def _parse_args():
     p.add_argument("--line_freqs", type=float, nargs="*", default=[60, 120, 180])
     p.add_argument("--downsample", type=int, default=500)
     p.add_argument("--crop_tmin", type=float, nargs=2, default=[10.0, 10.0])
-    p.add_argument("--crop_tmax", type=float, nargs=2, default=[190.0, 250.0])
+    p.add_argument("--crop_tmax", type=float, nargs=2, default=[110.0, 250.0])
     p.add_argument("--ecg_ch", type=str, default="ECG003")
     p.add_argument("--eog_ch", type=str, default="EOG001")
     p.add_argument("--reject_mag", type=float, default=4e-12)
