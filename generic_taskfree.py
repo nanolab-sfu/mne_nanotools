@@ -351,8 +351,8 @@ def preprocess_subject(
     h_freq: float = 200.0,
     line_freqs: tuple = (60, 120, 180),
     downsample: int = 500,
-    crop_tmin: tuple = (0., 30.),
-    crop_tmax: tuple = (300., 300.),
+    crop_tmin: tuple = (10, 10),
+    crop_tmax: tuple = (190, 250),
     ecg_ch: str = "ECG003",
     eog_ch: str = ["EOG001", "EOG002"],
     reject_mag: float = 4e-12,
@@ -965,7 +965,6 @@ def preprocess_subject(
             # Silence annoying joblib warnings
             os.environ["JOBLIB_TEMP_FOLDER"] = "/tmp"
             os.environ["JOBLIB_NO_MPI"] = "1"
-            raw.crop(tmin=30, tmax=130)
             # if STC does not exist: compute it
             if not os.path.exists(stc_path + "-lh.stc"):
                 print("→ Forward solution...")
@@ -1004,7 +1003,7 @@ def preprocess_subject(
         else:
             if not os.path.exists(stc_path + "-lh.stc"):
                 print(f"→ Computing Source Estimation {inv_method}")
-                start, stop = raw.time_as_index([crop_tmin[0],crop_tmax[0]])
+                start, stop = raw.time_as_index([0,crop_tmax[1]-crop_tmin[1]])
 
                 #Whats all this hyperparameters?! Make it more clear to you and everyone
                 filters = mne.beamformer.make_lcmv(
@@ -1163,8 +1162,8 @@ def _parse_args():
     p.add_argument("--h_freq", type=float, default=200.0)
     p.add_argument("--line_freqs", type=float, nargs="*", default=[60, 120, 180])
     p.add_argument("--downsample", type=int, default=500)
-    p.add_argument("--crop_tmin", type=float, nargs=2, default=[0.0, 30.0])
-    p.add_argument("--crop_tmax", type=float, nargs=2, default=[300.0, 300.0])
+    p.add_argument("--crop_tmin", type=float, nargs=2, default=[10.0, 10.0])
+    p.add_argument("--crop_tmax", type=float, nargs=2, default=[190.0, 250.0])
     p.add_argument("--ecg_ch", type=str, default="ECG003")
     p.add_argument("--eog_ch", type=str, default="EOG001")
     p.add_argument("--reject_mag", type=float, default=4e-12)
