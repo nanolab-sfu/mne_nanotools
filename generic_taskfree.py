@@ -426,6 +426,8 @@ def preprocess_subject(
             intended = io_handlers.strip_bids_prefix(head_coordinates["IntendedFor"])
             mri_basename = io_handlers.strip_nii_suffix(os.path.basename(intended))
             fs_subject = io_handlers.extract_bids_id(mri_basename)
+            while not os.path.isdir(os.path.join(fs_dir, fs_subject)) and re.search(r'_', fs_subject): #will look for the file that matches inside the freesufer output folder (no suffix).
+                fs_subject = fs_subject.rsplit('_', 1)[0]
             print("→ .json file was specified. following the path to subjects surface...")
 
         except Exception as e:

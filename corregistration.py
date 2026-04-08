@@ -26,7 +26,7 @@ from datetime import datetime
 
 
 sys.path.append(os.path.expanduser("~"))
-from nanotools import preprocessing, io_handlers
+from mne_nanotools import preprocessing, io_handlers
 
 def open_coregistration_gui(root_dir, 
                             subject_id,
@@ -116,6 +116,8 @@ def open_coregistration_gui(root_dir,
             intended = io_handlers.strip_bids_prefix(head_coordinates["IntendedFor"])
             mri_basename = io_handlers.strip_nii_suffix(os.path.basename(intended))
             fs_subject = io_handlers.extract_bids_id(mri_basename)
+            while not os.path.isdir(os.path.join(fs_dir, fs_subject)) and re.search(r'_', fs_subject): #will look for the file that matches inside the freesufer output folder (no suffix).
+                fs_subject = fs_subject.rsplit('_', 1)[0]
             bem_path = os.path.join(fs_dir, fs_subject, "bem", f"{fs_subject}-5120-5120-5120-bem-sol.fif")
             bem_dir = os.path.join(fs_dir, fs_subject, "bem")
             fiducials_file = os.path.join(bem_dir,f'{fs_subject}-fiducials.fif')

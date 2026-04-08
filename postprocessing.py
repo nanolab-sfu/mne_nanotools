@@ -14,6 +14,7 @@ import mne
 from scipy.signal import welch
 from joblib import Parallel, delayed
 import numpy as np
+import mne_connectivity
 
 def _compute_psd_single(vertex_ts, sfreq, window_samples, overlap_samples):
     """
