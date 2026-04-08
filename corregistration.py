@@ -17,6 +17,7 @@ import os
 import argparse
 import mne
 import sys
+import re
 import numpy as np
 import nibabel as nib
 import traceback
