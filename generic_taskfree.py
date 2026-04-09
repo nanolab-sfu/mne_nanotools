@@ -18,7 +18,7 @@ import os
 import argparse
 from pathlib import Path
 import glob
-import re #import
+import re
 import matplotlib
 matplotlib.use("Agg")  # headless mode for servers
 import matplotlib.pyplot as plt
@@ -532,7 +532,11 @@ def preprocess_subject(
                 f.write(traceback.format_exc())
     else:
         head_pos = None
-        raw.set_channel_types({"HEOG": "eog", "VEOG": "eog", "ECG": "ecg"})
+        mapping = {"HEOG": "eog", "VEOG": "eog","ECG": "ecg"}
+        ch_type_map = {ch: typ for ch, typ in mapping.items() if ch in raw.ch_names}
+        if ch_type_map:
+            raw.set_channel_types(ch_type_map)
+        
         raw.pick(["meg", "stim", "misc", "eog", "ecg"]).load_data()
 
     # ---- Cached tSSS paths (derived from input FIF filenames) ----
