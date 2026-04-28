@@ -26,23 +26,25 @@ from matplotlib.backends.backend_pdf import PdfPages
 import numpy as np
 from mne.io.constants import FIFF
 
-# ---- custom user modules ----
 import sys
 sys.path.append(os.path.expanduser("~"))
-from mne_nanotools import preprocessing, postprocessing
+from mne_nanotools import preprocessing
 
 
 # =====================================================================
 # MAIN FUNCTION
 # =====================================================================
 
-def run_remove_digitilized_points(root_dir, subject_id, session, task):
+def run_remove_digitilized_points(root_dir, subject_id, session, task, run):
 
     # ====== BUILD PATHS ======================================================
     root_dir = os.path.abspath(root_dir)
     meg_dir = os.path.join(root_dir, "MEG", subject_id, session)
+    meg_nested = os.path.join(meg_dir, "meg")
+    print(meg_nested)
+    meg_dir = meg_nested if os.path.isdir(meg_nested) else meg_dir
 
-    basename = f"{subject_id}_{session}_{task}.fif"
+    basename = f"{subject_id}_{session}_task-{task}_{run}_meg.fif"
     path2raw = os.path.join(meg_dir, basename)
 
     if not os.path.exists(path2raw):
@@ -228,7 +230,8 @@ if __name__ == "__main__":
     parser.add_argument("--root_dir", required=True, help="Root project directory")
     parser.add_argument("--subject_id", required=True, help="Subject ID (e.g., sub-BRS0035)")
     parser.add_argument("--session", required=True, help="Session folder (e.g., 251016)")
-    parser.add_argument("--task", default="rest1", help="Task run name")
+    parser.add_argument("--task", default="rest", help="Task run name (rest)")
+    parser.add_argument("--run", default="run-1", help="Task iteration number (e.g., run-1)")
 
     args = parser.parse_args()
 
@@ -237,4 +240,5 @@ if __name__ == "__main__":
         subject_id=args.subject_id,
         session=args.session,
         task=args.task,
+        run=args.run,
     )

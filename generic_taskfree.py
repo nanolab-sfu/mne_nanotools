@@ -37,6 +37,19 @@ from mne_nanotools import preprocessing, postprocessing, io_handlers
 # Local file discovery helpers (supports MNE-style + BIDS-style + suffixed variants)
 # ----------------------------------------------------------
 
+def parse_ranges(arg):
+    """
+    Parse string like:
+    "42-45,50-53"
+    into:
+    [(42, 45), (50, 53)]
+    """
+    ranges = []
+    for part in arg.split(","):
+        start, end = part.split("-")
+        ranges.append((float(start), float(end)))
+    return ranges
+
 def find_meg(root_dir: str,
                  subject_id: str,
                  session: str | None = None,
@@ -357,6 +370,7 @@ def preprocess_subject(
     eog_ch: str = ["EOG001", "EOG002"],
     reject_mag: float = 4e-12,
     reject_grad: float = 4000e-13,
+    eSSS : str | None = None,
     subjects_dir_name: str = "MRI/freesurfer",
     compute_bem_if_missing: bool = True,
     bem_watershed: bool = True,
@@ -366,6 +380,7 @@ def preprocess_subject(
     additional_bads: tuple = (),
     n_jobs: int = 8,
     num_proj: tuple = (1,1), # ECG and EOG proj
+    erm_ssp_band: str | list = "broad",
     verbose: bool = False,
     system: str = "MEGIN",
     json: bool = False,
@@ -502,8 +517,25 @@ def preprocess_subject(
        raw = io_handlers.inject_dig_into_raw(raw, fids=fids, hsp=hsp, hpi=hpi)
 
     report.add_raw(raw=raw, title="Raw Resting", scalings='auto')
+
+    # ---- Head Movement Report ----
+
+    try: 
+        preprocessing.compute_head_movement_report(raw, report, subject_id, deriv_dir, system_upper)
     
-    # ---- PSD after tSSS ----
+    except Exception as e:
+        print(f"⚠️ Head movement report failed: {e}")
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        with open(log_file, "w") as f:
+            f.write("⚠️ Head movement report failed: \n")
+            f.write(f"Timestamp: {timestamp}\n\n")
+            f.write("Error message:\n")
+            f.write(str(e) + "\n\n")
+            f.write("Traceback:\n")
+            f.write(traceback.format_exc())
+
+    # ---- PSD before tSSS ----
     fig = raw.compute_psd(fmax=200,
             method="welch", picks=['meg'],
             n_fft=int(4 * raw.info["sfreq"]),     # 4-second window
@@ -548,33 +580,56 @@ def preprocess_subject(
     #   sub_NVAR008_erm_raw.fif -> sub_NVAR008_erm_raw_tsss.fif
     #   sub-BRS0034_ses-20241217_task-erm_meg.fif -> ..._task-erm_meg_tsss.fif
     tsss_erm_path = str(Path(path2raw_erm).with_suffix("")) + "_tsss.fif"
-
+    extended_proj = []
     if system_upper == "MEGIN":
-        if os.path.exists(tsss_raw_path) and os.path.exists(tsss_erm_path):
-            print("→ Loading existing tSSS files...")
-            raw = mne.io.read_raw_fif(tsss_raw_path, preload=True)
-            raw_erm = mne.io.read_raw_fif(tsss_erm_path, preload=True)
-            if head_pos is None:
-                try:
-                    head_pos = mne.chpi.read_head_pos(head_pos_path)
-                except Exception:
-                    head_pos = None
-        else:
-            # ---------- REST / TASK DATA ----------
-            if _already_has_sss(raw):
-                print("→ Input data already has Maxwell/SSS applied; skipping tSSS and caching as-is...")
-                if not os.path.exists(tsss_raw_path):
-                    raw.save(tsss_raw_path, overwrite=True)
+        try:
+            if os.path.exists(tsss_raw_path) and os.path.exists(tsss_erm_path):
+                print("→ Loading existing tSSS files...")
+                raw = mne.io.read_raw_fif(tsss_raw_path, preload=True)
+                raw_erm = mne.io.read_raw_fif(tsss_erm_path, preload=True)
+                if head_pos is None:
+                    try:
+                        head_pos = mne.chpi.read_head_pos(head_pos_path)
+                    except Exception:
+                        head_pos = None
             else:
-                print("→ Applying tSSS to resting...")
-                raw = preprocessing.max_filter(
-                    raw,
-                    calibration=calibration if os.path.exists(calibration) else None,
-                    cross_talk=cross_talk if os.path.exists(cross_talk) else None,
-                    st_duration=st_duration,
-                    head_pos=head_pos,
-                )
-                raw.save(tsss_raw_path, overwrite=True)
+                # ---------- REST / TASK DATA ----------
+                if _already_has_sss(raw):
+                    print("→ Input data already has Maxwell/SSS applied; skipping tSSS and caching as-is...")
+                    if not os.path.exists(tsss_raw_path):
+                        raw.save(tsss_raw_path, overwrite=True)
+                else:
+                    print("→ Applying tSSS to resting...")
+
+                    # Build extended projections from ERM
+                    if eSSS: 
+
+                        for i, (low_freq, high_freq) in enumerate(eSSS):
+                            print(f"Computing projections for band {low_freq}-{high_freq} Hz")
+                            filt_erm = raw_erm.copy().filter(l_freq=low_freq, h_freq=high_freq)
+                            # You can customize number of components per band
+                            if i == 0:
+                                n_mag, n_grad = 1, 1
+                            else:
+                                n_mag, n_grad = 3, 3
+
+                            proj = mne.compute_proj_raw(
+                                filt_erm,
+                                meg="combined",
+                                n_mag=n_mag,
+                                n_grad=n_grad
+                            )
+                            extended_proj.extend(proj)
+
+                    raw = preprocessing.max_filter(
+                        raw,
+                        extended_proj=extended_proj,
+                        calibration=calibration if os.path.exists(calibration) else None,
+                        cross_talk=cross_talk if os.path.exists(cross_talk) else None,
+                        st_duration=st_duration,
+                        head_pos=head_pos,
+                    )
+                    raw.save(tsss_raw_path, overwrite=True)
 
             # ---------- ERM ----------
             if _already_has_sss(raw_erm):
@@ -585,25 +640,37 @@ def preprocess_subject(
                 print("→ Applying SSS to ERM...")
                 raw_erm = preprocessing.max_filter(
                     raw_erm,
+                    extended_proj=extended_proj,
                     calibration=calibration if os.path.exists(calibration) else None,
                     cross_talk=cross_talk if os.path.exists(cross_talk) else None,
                     st_duration=sss_erm_st_duration,
                     head_pos=None,
                 )
                 raw_erm.save(tsss_erm_path, overwrite=True)
-        
+                
+        except Exception as e:
+            print(f"⚠️ Could not apply Maxwell filter: {e}")
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            with open(log_file, "w") as f:
+                f.write(f"⚠️ Could not apply Maxwell filter: {e}\n")
+                f.write(f"Timestamp: {timestamp}\n\n")
+                f.write("Error message:\n")
+                f.write(str(e) + "\n\n")
+                f.write("Traceback:\n")
+                f.write(traceback.format_exc())   
         # Rename path2raw to facilitate naming conventions
         path2raw = tsss_raw_path
         path2raw_erm = tsss_erm_path
         
         # ---- PSD after tSSS ----
-        fig = raw.compute_psd(fmax=250,
+        fig = raw.compute_psd(fmax=180,
                 method="welch", picks=['meg'],
                 n_fft=int(4 * raw.info["sfreq"]),     # 4-second window
                 n_overlap=int(2 * raw.info["sfreq"]),     # 50% overlap (2-second)
                 average='mean',
                 window='hann').plot(picks="data", exclude="bads", amplitude=True, show=False)
-        report.add_figure(fig=fig, title="PSD after tSSS")
+        report.add_figure(fig=fig, title=f"PSD after tSSS, eSSS:{eSSS}")
         
     else:
         print("→ System set to CTF: skipping tSSS/Maxwell filtering; using input data directly.")
@@ -651,7 +718,7 @@ def preprocess_subject(
         print(f"→ Downsampling to {downsample} Hz")
         raw.resample(downsample)
         raw_erm.resample(downsample)
-        fig = raw.compute_psd(fmax=200,
+        fig = raw.compute_psd(fmax=180,
             method="welch",
             n_fft=int(4 * raw.info["sfreq"]),     # 4-second window
             n_overlap=int(2 * raw.info["sfreq"]),     # 50% overlap (2-second)
@@ -700,11 +767,36 @@ def preprocess_subject(
             f.write(traceback.format_exc())
 
     
-    # ---- ERM-based SSP ----
+    # ---- SSP ----
     try:
+        
         print("→ Applying SSP")
-        er_proj = mne.compute_proj_raw(raw_erm, n_grad=0, n_mag=3, verbose=True)
+        # ERM SSP can be broadband or computed from a specific band
+        erm_for_ssp = raw_erm
+        if erm_ssp_band != "broad":
+            if not isinstance(erm_ssp_band, (list, tuple)) or len(erm_ssp_band) != 2:
+                raise ValueError("erm_ssp_band must be 'broad' or [low, high]")
+            low, high = erm_ssp_band
+            print(f"→ Computing ERM SSP using filtered band {low}-{high} Hz")
+            erm_ssp_caption = f"Band-limited ERM SSP projectors extracted after filtering the ERM from {low} to {high} Hz."
+            erm_for_ssp = raw_erm.copy().filter(l_freq=low, h_freq=high)
+        else:
+            print("→ Computing ERM SSP using broadband ERM (no filtering)")
+            erm_ssp_caption = "Broadband ERM SSP projectors; no additional ERM filtering was applied before SSP extraction."
+        er_proj = mne.compute_proj_raw(erm_for_ssp, n_grad=3, n_mag=3, verbose=True)
+        
+        er_exp_var = []
+        for proj in er_proj:
+            if "explained_var" in proj:
+                er_exp_var.append(f"{np.round(proj['explained_var'], 2)}%")
 
+        fig = mne.viz.plot_projs_topomap(er_proj, info=raw_erm.info, show=False)
+        fig.suptitle("ERM SSP projectors")
+        report.add_figure(
+            fig,
+            title="ERM Projections",
+            caption=f"{erm_ssp_caption} Explained variance: {', '.join(er_exp_var) if er_exp_var else 'not available'}."
+        )
 
         # Create SSP ecg/eog projectors
         ecg_proj, ecg_array = mne.preprocessing.compute_proj_ecg(raw,n_grad=3,n_mag=3, reject=None) # For ECG proj, first pca is always enough
@@ -725,7 +817,7 @@ def preprocess_subject(
             exp_var.append('%, ')
         report.add_figure(fig, title='Eog Projections', caption = f"{', '.join(exp_var)} — num of proj selected = {num_proj[1]}")
 
-        # EOG/ECG projections
+        # EOG/ECG projections are added after ERM SSP projectors
         for i in range(0,num_proj[0]):
             raw.add_proj(ecg_proj[i]) #For ECG proj, first pca is always enough
             raw_erm.add_proj(ecg_proj[i]) 
@@ -733,6 +825,10 @@ def preprocess_subject(
         for i in range(0,num_proj[1]):
             raw.add_proj(eog_proj[i]) #For EOG proj, first pca seems enough
             raw_erm.add_proj(eog_proj[i])
+
+        for i in range(0,num_proj[0]):
+            raw.add_proj(er_proj[i]) #For ECG proj, first pca is always enough
+            raw_erm.add_proj(er_proj[i]) 
 
         raw.apply_proj()
         raw_erm.apply_proj()
@@ -768,7 +864,7 @@ def preprocess_subject(
         raw.set_annotations(ann + raw.annotations)
         raw.load_data() # Ensure BAD segments are masked
 
-        fig = raw.compute_psd(fmax=200).plot(picks="data", exclude="bads", amplitude=True, show=False)
+        fig = raw.compute_psd(fmax=180).plot(picks="data", exclude="bads", amplitude=True, show=False)
 
         report.add_figure(fig, title="PSD after MAD")
         
@@ -1174,6 +1270,7 @@ def _parse_args():
     p.add_argument("--eog_ch", type=str, default="EOG001")
     p.add_argument("--reject_mag", type=float, default=4e-12)
     p.add_argument("--reject_grad", type=float, default=4000e-13)
+    p.add_argument("--eSSS", type=parse_ranges, default=None, required=False, help="Frequency ranges for eSSS as start-end pairs, e.g. 42-45,50-53")
     p.add_argument("--subjects_dir_name", type=str, default="MRI/freesurfer")
     p.add_argument("--compute_bem_if_missing", action="store_true", default=True)
     p.add_argument("--no_compute_bem_if_missing", dest="compute_bem_if_missing", action="store_false")
@@ -1182,11 +1279,13 @@ def _parse_args():
     p.add_argument("--inv_method", type=str, default="beamformer", choices=["MNE", "dSPM", "sLORETA","beamformer"])
     p.add_argument("--snr", type=float, default=3.0)
     p.add_argument("--n_jobs", type=int, default=8)
-    p.add_argument("--num_proj", type=int, default=[1,1])
+    p.add_argument("--num_proj", type=int, nargs=2, default=[1, 1], help="Number of ECG and EOG SSP projectors to apply, respectively. Example: --num_proj 1 1")
+    p.add_argument("--erm_ssp_band", type=str, default="broad", help="ERM band for SSP: 'broad' or low-high (e.g. 10-20)")
     # additional_bads como lista
     p.add_argument("--additional_bads", type=str, nargs="*", default=[])
     p.add_argument("--verbose", action="store_true", help="Enable verbose MNE output")
     p.add_argument("--json", action = "store_true", help="Only true if .json file with fidutials exists AND was use to generete the coregistation automatically")
+    
     return p.parse_args()
 
 
@@ -1229,6 +1328,13 @@ if __name__ == "__main__":
 
     print(f"ERM path: {erm_path}")
 
+    # Parse erm_ssp_band argument
+    if args.erm_ssp_band == "broad":
+        erm_ssp_band = "broad"
+    else:
+        low, high = args.erm_ssp_band.split("-")
+        erm_ssp_band = [float(low), float(high)]
+
     preprocess_subject(
         root_dir=args.root_dir,
         subject_id=args.subject_id,
@@ -1253,6 +1359,7 @@ if __name__ == "__main__":
         eog_ch=args.eog_ch,
         reject_mag=args.reject_mag,
         reject_grad=args.reject_grad,
+        eSSS=args.eSSS,
         subjects_dir_name=args.subjects_dir_name,
         compute_bem_if_missing=args.compute_bem_if_missing,
         bem_watershed=args.bem_watershed,
@@ -1261,6 +1368,7 @@ if __name__ == "__main__":
         additional_bads=tuple(args.additional_bads),
         n_jobs=args.n_jobs,
         num_proj=args.num_proj,
+        erm_ssp_band=erm_ssp_band,
         verbose=args.verbose,
         system=args.system,
         json=args.json,

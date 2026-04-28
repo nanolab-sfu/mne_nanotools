@@ -17,10 +17,10 @@ import os
 import argparse
 import mne
 import sys
-import re
 import numpy as np
 import nibabel as nib
 import traceback
+import re
 from mne.bem import make_scalp_surfaces, make_watershed_bem
 from mne.io.constants import FIFF
 from datetime import datetime
@@ -34,6 +34,7 @@ def open_coregistration_gui(root_dir,
                             subjects_dir_name,
                             session,
                             suffix,
+                            prefer,
                             compute_bem_if_missing,
                             system,
                             mri_fiducials,
@@ -102,7 +103,7 @@ def open_coregistration_gui(root_dir,
         and "erm" not in f.lower()
     )
     ]
-    
+
     trans_found = [f for f in os.listdir(meg_dir) if f.endswith("-corr_trans.fif")]
     if trans_found and overwrite==False:
         print(f"Found existing file: {trans_found[0]}. Skipping... \n")
@@ -216,7 +217,8 @@ def open_coregistration_gui(root_dir,
     print(f"\n🧠 Launching MNE coregistration for {subject_id}")
     print(f"Subjects dir: {fs_dir}")
     if meg_files:
-        raw_path = os.path.join(meg_dir, meg_files[0])
+        selected_file = next((f for f in meg_files if f.endswith(f"{prefer}{meg_ext}")), meg_files[0])
+        raw_path = os.path.join(meg_dir, selected_file)
         print(f"→ Using {raw_path} for head shape / fiducials.")
     else:
         raw_path = None
@@ -229,7 +231,7 @@ def open_coregistration_gui(root_dir,
             print("Then simply close the GUI to end this script.")
         else:
             print("\n✅ When you finish aligning in the GUI, click “Save” to write:")
-            print(f"   {meg_dir}/{subject_id}-{session}-corr_trans.fif")
+            print(f"   {meg_dir}/{subject_id}_{session}-corr_trans.fif")
             print("Then simply close the GUI to end this script.")
     else: 
         if mri_fiducials or json:
@@ -377,6 +379,8 @@ def _parse_args():
                    help="Session by date or order (e.g., 01012020 or ses-1)")
     p.add_argument("--suffix", type=str, default=None,
                    help="Optional FreeSurfer subject suffix (e.g., 'ses-01_run-2' for multiple T1w runs.")
+    p.add_argument("--prefer", type=str, default=None, required=False,
+                   help="Preference token when multiple match: 'any', 'raw', or any substring to prefer (e.g., digFiltered, channels_removed).")
     p.add_argument("--compute_bem_if_missing", action="store_true", default=True)
     p.add_argument("--system", type=str, default="MEGIN", choices=["MEGIN", "CTF"],
                    help="MEG system; sets expected raw extension (.fif for MEGIN, .ds for CTF) and TSSS handling.")
@@ -395,6 +399,7 @@ if __name__ == "__main__":
         subjects_dir_name=args.subjects_dir_name,
         session=args.session,
         suffix=args.suffix,
+        prefer=args.prefer,
         compute_bem_if_missing=args.compute_bem_if_missing,
         system=args.system,
         mri_fiducials=args.mri_fiducials,
