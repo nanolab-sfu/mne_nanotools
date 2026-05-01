@@ -384,6 +384,7 @@ def preprocess_subject(
     verbose: bool = False,
     system: str = "MEGIN",
     json: bool = False,
+    overwrite: bool = False,
 ):
     """
     Generic preprocessing pipeline for MEGIN/CTF resting-state data:
@@ -583,7 +584,7 @@ def preprocess_subject(
     extended_proj = []
     if system_upper == "MEGIN":
         try:
-            if os.path.exists(tsss_raw_path) and os.path.exists(tsss_erm_path):
+            if os.path.exists(tsss_raw_path) and os.path.exists(tsss_erm_path) and not overwrite:
                 print("→ Loading existing tSSS files...")
                 raw = mne.io.read_raw_fif(tsss_raw_path, preload=True)
                 raw_erm = mne.io.read_raw_fif(tsss_erm_path, preload=True)
@@ -1068,7 +1069,7 @@ def preprocess_subject(
             os.environ["JOBLIB_TEMP_FOLDER"] = "/tmp"
             os.environ["JOBLIB_NO_MPI"] = "1"
             # if STC does not exist: compute it
-            if not os.path.exists(stc_path + "-lh.stc"):
+            if not os.path.exists(stc_path + "-lh.stc") or overwrite:
                 print("→ Forward solution...")
                 print(f"→ Inverse operator ({inv_method})...")
 
@@ -1103,7 +1104,7 @@ def preprocess_subject(
 
         # ------------------ BEAMFORMER ------------------
         else:
-            if not os.path.exists(stc_path + "-lh.stc"):
+            if not os.path.exists(stc_path + "-lh.stc") or overwrite:
                 print(f"→ Computing Source Estimation {inv_method}")
                 start, stop = raw.time_as_index([0,crop_tmax[1]-crop_tmin[1]])
 
@@ -1225,7 +1226,7 @@ def preprocess_subject(
         report_path = os.path.join(report_dir, Path(os.path.basename(path2raw)).stem + "_QC_report.html")
         # Ensure directory exists
         os.makedirs(report_dir, exist_ok=True)
-        fig_path = os.path.join(report_dir, f"PSD_band_dist" + Path(os.path.basename(path2raw)).stem + ".png")
+        fig_path = os.path.join(report_dir, "PSD_band_dist" + Path(os.path.basename(path2raw)).stem + ".png")
         plt.savefig(fig_path, dpi=300, bbox_inches='tight')
         plt.close('all')
         report.add_figure(plt.figure(), title="Spectrally Resolved Source Estimation (placeholder panel)")
@@ -1285,7 +1286,7 @@ def _parse_args():
     p.add_argument("--additional_bads", type=str, nargs="*", default=[])
     p.add_argument("--verbose", action="store_true", help="Enable verbose MNE output")
     p.add_argument("--json", action = "store_true", help="Only true if .json file with fidutials exists AND was use to generete the coregistation automatically")
-    
+    p.add_argument("--overwrite", action = "store_true", help="If called, it will overwrite all the *_tsss.fif, *.stc and report files, allong any other output.")
     return p.parse_args()
 
 
@@ -1372,4 +1373,5 @@ if __name__ == "__main__":
         verbose=args.verbose,
         system=args.system,
         json=args.json,
+        overwrite=args.overwrite,
     )
