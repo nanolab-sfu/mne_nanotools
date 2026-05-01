@@ -2,7 +2,8 @@
 
 **mne_nanotools** is a lightweight, reusable Python toolkit maintained by the NanoLab (SFU) to support **MEG workflows built around MNE-Python**, with utilities for **pre-processing, post-processing, I/O handling, and pipeline orchestration**. The repository is designed to be imported inside larger analysis scripts rather than used as a standalone application.  
 
-**Author:** Santiago Isaac Flores Alonso  
+**Author:** Santiago Isaac Flores Alonso
+**Co-developer:** Isabel Wilson
 **Version:** 0.1.0
 
 ---
