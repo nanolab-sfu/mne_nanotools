@@ -6,8 +6,12 @@ Created on Mon Jan 19 19:43:02 2026
 @author: isaant
 """
 
+import re
+import json
 import mne
 import numpy as np
+import nibabel as nib
+from nibabel.affines import apply_affine
 from mne.io.constants import FIFF
 
 
@@ -71,3 +75,54 @@ def inject_dig_into_raw(raw, fids, hsp, hpi=None):
     raw.set_montage(montage, on_missing="ignore")
     return raw
 
+def strip_bids_prefix(path: str) -> str:
+    return path.replace("bids::", "")
+
+
+def strip_nii_suffix(fname: str) -> str:
+    """Remove .nii or .nii.gz"""
+    return re.sub(r"\.nii(\.gz)?$", "", fname)
+
+
+def extract_bids_session(path: str, fallback=None) -> str:
+    m = re.search(r"(ses-[^_/]+)", path)
+    return m.group(1) if m else fallback
+
+def extract_bids_id(path: str, fallback=None) -> str:
+    m = re.search(r"(sub-[^_]+_ses-[^_]+_run-[^_]+)", path)
+    return m.group(1) if m else fallback
+    
+
+
+def fiff_ident_from_label(label: str):
+    label = label.upper()
+    if label == "LPA":
+        return FIFF.FIFFV_POINT_LPA
+    if label in ("NAS", "NASION"):
+        return FIFF.FIFFV_POINT_NASION
+    if label == "RPA":
+        return FIFF.FIFFV_POINT_RPA
+    return None
+
+
+def load_json(path: str) -> dict:
+    with open(path, "r") as f:
+        return json.load(f)
+
+
+def scannerRAS_to_tkrRAS_matrix(t1_mgz: str) -> np.ndarray:
+    """Return scannerRAS(mm) → tkrRAS(mm) transform from FreeSurfer T1.mgz"""
+    mgz = nib.load(t1_mgz)
+    vox2ras = mgz.header.get_vox2ras()
+    vox2tkr = mgz.header.get_vox2ras_tkr()
+    return vox2tkr @ np.linalg.inv(vox2ras)
+
+
+def nifti_ijk_to_tkrRAS(
+    ijk: np.ndarray,
+    nifti_affine: np.ndarray,
+    scannerRAS_to_tkrRAS: np.ndarray,
+) -> np.ndarray:
+    """NIfTI ijk → tkrRAS (mm)"""
+    ras_scanner_mm = apply_affine(nifti_affine, ijk)
+    return (scannerRAS_to_tkrRAS @ np.r_[ras_scanner_mm, 1.0])[:3]

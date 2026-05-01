@@ -26,6 +26,8 @@ import mne
 import numpy as np
 from importlib import reload
 from mne.report import Report
+from datetime import datetime
+import traceback
 
 # ---- custom user modules ----
 import sys
@@ -34,6 +36,19 @@ from mne_nanotools import preprocessing, postprocessing, io_handlers
 
 # Local file discovery helpers (supports MNE-style + BIDS-style + suffixed variants)
 # ----------------------------------------------------------
+
+def parse_ranges(arg):
+    """
+    Parse string like:
+    "42-45,50-53"
+    into:
+    [(42, 45), (50, 53)]
+    """
+    ranges = []
+    for part in arg.split(","):
+        start, end = part.split("-")
+        ranges.append((float(start), float(end)))
+    return ranges
 
 def find_meg(root_dir: str,
                  subject_id: str,
@@ -188,7 +203,7 @@ def find_meg(root_dir: str,
                 # Prefer "clean" BIDS names when possible (exact *_meg.ext) and avoid known processed tokens
                 if re.search(rf"_meg{ext_re}$", name):
                     s += 10
-                if "digFiltered" in name:
+                else:
                     s -= 2
             else:
                 s += 10 if prefer in name else 0
@@ -335,7 +350,9 @@ def preprocess_subject(
     root_dir: str,
     subject_id: str,
     session: str | None = None,
+    suffix : str | None = None,
     task: str = 'rest1',
+    trans: str = '-corr_trans.fif',
     in_file: str | None = None,
     erm_file: str | None = None,
     task_basename: str = "{sub}_{task}_raw",
@@ -347,12 +364,13 @@ def preprocess_subject(
     h_freq: float = 200.0,
     line_freqs: tuple = (60, 120, 180),
     downsample: int = 500,
-    crop_tmin: tuple = (0., 30.),
-    crop_tmax: tuple = (300., 300.),
+    crop_tmin: tuple = (10, 10),
+    crop_tmax: tuple = (110, 250),
     ecg_ch: str = "ECG003",
     eog_ch: str = ["EOG001", "EOG002"],
     reject_mag: float = 4e-12,
     reject_grad: float = 4000e-13,
+    eSSS : str | None = None,
     subjects_dir_name: str = "MRI/freesurfer",
     compute_bem_if_missing: bool = True,
     bem_watershed: bool = True,
@@ -362,8 +380,11 @@ def preprocess_subject(
     additional_bads: tuple = (),
     n_jobs: int = 8,
     num_proj: tuple = (1,1), # ECG and EOG proj
+    erm_ssp_band: str | list = "broad",
     verbose: bool = False,
     system: str = "MEGIN",
+    json: bool = False,
+    overwrite: bool = False,
 ):
     """
     Generic preprocessing pipeline for MEGIN/CTF resting-state data:
@@ -395,7 +416,14 @@ def preprocess_subject(
     # ---- Directory setup ----
     subject = subject_id
     parent_path = os.path.abspath(root_dir)
-    fs_dir = os.path.join(parent_path, subjects_dir_name)   # /MRI/freesurfer/sub-XX
+    log_dir = os.path.join(root_dir, "logs")
+    os.makedirs(log_dir, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = os.path.join(log_dir, f"generic_taskfree_{subject_id}_{timestamp}.txt")
+
+    fs_dir = os.path.join(parent_path, subjects_dir_name)
+
     if session is None:
         meg_dir = os.path.join(root_dir, "MEG", subject_id)
         deriv_dir = os.path.join(parent_path, "derivatives", subject_id)    # /derivatives/sub-XX
@@ -406,6 +434,33 @@ def preprocess_subject(
     # Support BIDS-style nested layout: .../MEG/sub-XX/ses-YYYY/meg
     meg_nested = os.path.join(meg_dir, "meg")
     meg_dir = meg_nested if os.path.isdir(meg_nested) else meg_dir
+
+    if json:
+        try:
+            head_coordinate_file = os.path.join(meg_dir, f"{subject_id}_{session}_coordsystem.json")
+            head_coordinates = io_handlers.load_json(head_coordinate_file)
+            intended = io_handlers.strip_bids_prefix(head_coordinates["IntendedFor"])
+            mri_basename = io_handlers.strip_nii_suffix(os.path.basename(intended))
+            fs_subject = io_handlers.extract_bids_id(mri_basename)
+            while not os.path.isdir(os.path.join(fs_dir, fs_subject)) and re.search(r'_', fs_subject): #will look for the file that matches inside the freesufer output folder (no suffix).
+                fs_subject = fs_subject.rsplit('_', 1)[0]
+            print("→ .json file was specified. following the path to subjects surface...")
+
+        except Exception as e:
+            # ---- Write error to txt ----
+            print(f"⚠️ Could not find .json file: {e}. System will exit")
+            
+            with open(log_file, "w") as f:
+                f.write("No .json file found\n")
+                f.write(f"Timestamp: {timestamp}\n\n")
+                f.write("Error message:\n")
+                f.write(str(e) + "\n\n")
+                f.write("Traceback:\n")
+                f.write(traceback.format_exc())
+
+            sys.exit(1)
+    else:
+            fs_subject = f"{subject_id}_{suffix}" if suffix else subject_id# /MRI/freesurfer/sub-XX
 
 
     os.makedirs(deriv_dir, exist_ok=True)
@@ -463,8 +518,25 @@ def preprocess_subject(
        raw = io_handlers.inject_dig_into_raw(raw, fids=fids, hsp=hsp, hpi=hpi)
 
     report.add_raw(raw=raw, title="Raw Resting", scalings='auto')
+
+    # ---- Head Movement Report ----
+
+    try: 
+        preprocessing.compute_head_movement_report(raw, report, subject_id, deriv_dir, system_upper)
     
-    # ---- PSD after tSSS ----
+    except Exception as e:
+        print(f"⚠️ Head movement report failed: {e}")
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        with open(log_file, "w") as f:
+            f.write("⚠️ Head movement report failed: \n")
+            f.write(f"Timestamp: {timestamp}\n\n")
+            f.write("Error message:\n")
+            f.write(str(e) + "\n\n")
+            f.write("Traceback:\n")
+            f.write(traceback.format_exc())
+
+    # ---- PSD before tSSS ----
     fig = raw.compute_psd(fmax=200,
             method="welch", picks=['meg'],
             n_fft=int(4 * raw.info["sfreq"]),     # 4-second window
@@ -482,9 +554,22 @@ def preprocess_subject(
             print(f"⚠️ Could not read head_pos from {head_pos_path}: {e}, it will be computed now")
             head_pos = preprocessing.compute_head_position(raw)
             mne.chpi.write_head_pos(head_pos_path, head_pos)
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            with open(log_file, "w") as f:
+                f.write(f"⚠️ Could not read head_pos from {head_pos_path}. it was computed\n")
+                f.write(f"Timestamp: {timestamp}\n\n")
+                f.write("Error message:\n")
+                f.write(str(e) + "\n\n")
+                f.write("Traceback:\n")
+                f.write(traceback.format_exc())
     else:
         head_pos = None
-        raw.set_channel_types({"HEOG": "eog", "VEOG": "eog", "ECG": "ecg"})
+        mapping = {"HEOG": "eog", "VEOG": "eog","ECG": "ecg"}
+        ch_type_map = {ch: typ for ch, typ in mapping.items() if ch in raw.ch_names}
+        if ch_type_map:
+            raw.set_channel_types(ch_type_map)
+        
         raw.pick(["meg", "stim", "misc", "eog", "ecg"]).load_data()
 
     # ---- Cached tSSS paths (derived from input FIF filenames) ----
@@ -496,33 +581,56 @@ def preprocess_subject(
     #   sub_NVAR008_erm_raw.fif -> sub_NVAR008_erm_raw_tsss.fif
     #   sub-BRS0034_ses-20241217_task-erm_meg.fif -> ..._task-erm_meg_tsss.fif
     tsss_erm_path = str(Path(path2raw_erm).with_suffix("")) + "_tsss.fif"
-
+    extended_proj = []
     if system_upper == "MEGIN":
-        if os.path.exists(tsss_raw_path) and os.path.exists(tsss_erm_path):
-            print("→ Loading existing tSSS files...")
-            raw = mne.io.read_raw_fif(tsss_raw_path, preload=True)
-            raw_erm = mne.io.read_raw_fif(tsss_erm_path, preload=True)
-            if head_pos is None:
-                try:
-                    head_pos = mne.chpi.read_head_pos(head_pos_path)
-                except Exception:
-                    head_pos = None
-        else:
-            # ---------- REST / TASK DATA ----------
-            if _already_has_sss(raw):
-                print("→ Input data already has Maxwell/SSS applied; skipping tSSS and caching as-is...")
-                if not os.path.exists(tsss_raw_path):
-                    raw.save(tsss_raw_path, overwrite=True)
+        try:
+            if os.path.exists(tsss_raw_path) and os.path.exists(tsss_erm_path) and not overwrite:
+                print("→ Loading existing tSSS files...")
+                raw = mne.io.read_raw_fif(tsss_raw_path, preload=True)
+                raw_erm = mne.io.read_raw_fif(tsss_erm_path, preload=True)
+                if head_pos is None:
+                    try:
+                        head_pos = mne.chpi.read_head_pos(head_pos_path)
+                    except Exception:
+                        head_pos = None
             else:
-                print("→ Applying tSSS to resting...")
-                raw = preprocessing.max_filter(
-                    raw,
-                    calibration=calibration if os.path.exists(calibration) else None,
-                    cross_talk=cross_talk if os.path.exists(cross_talk) else None,
-                    st_duration=st_duration,
-                    head_pos=head_pos,
-                )
-                raw.save(tsss_raw_path, overwrite=True)
+                # ---------- REST / TASK DATA ----------
+                if _already_has_sss(raw):
+                    print("→ Input data already has Maxwell/SSS applied; skipping tSSS and caching as-is...")
+                    if not os.path.exists(tsss_raw_path):
+                        raw.save(tsss_raw_path, overwrite=True)
+                else:
+                    print("→ Applying tSSS to resting...")
+
+                    # Build extended projections from ERM
+                    if eSSS: 
+
+                        for i, (low_freq, high_freq) in enumerate(eSSS):
+                            print(f"Computing projections for band {low_freq}-{high_freq} Hz")
+                            filt_erm = raw_erm.copy().filter(l_freq=low_freq, h_freq=high_freq)
+                            # You can customize number of components per band
+                            if i == 0:
+                                n_mag, n_grad = 1, 1
+                            else:
+                                n_mag, n_grad = 3, 3
+
+                            proj = mne.compute_proj_raw(
+                                filt_erm,
+                                meg="combined",
+                                n_mag=n_mag,
+                                n_grad=n_grad
+                            )
+                            extended_proj.extend(proj)
+
+                    raw = preprocessing.max_filter(
+                        raw,
+                        extended_proj=extended_proj,
+                        calibration=calibration if os.path.exists(calibration) else None,
+                        cross_talk=cross_talk if os.path.exists(cross_talk) else None,
+                        st_duration=st_duration,
+                        head_pos=head_pos,
+                    )
+                    raw.save(tsss_raw_path, overwrite=True)
 
             # ---------- ERM ----------
             if _already_has_sss(raw_erm):
@@ -533,25 +641,37 @@ def preprocess_subject(
                 print("→ Applying SSS to ERM...")
                 raw_erm = preprocessing.max_filter(
                     raw_erm,
+                    extended_proj=extended_proj,
                     calibration=calibration if os.path.exists(calibration) else None,
                     cross_talk=cross_talk if os.path.exists(cross_talk) else None,
                     st_duration=sss_erm_st_duration,
                     head_pos=None,
                 )
                 raw_erm.save(tsss_erm_path, overwrite=True)
-        
+                
+        except Exception as e:
+            print(f"⚠️ Could not apply Maxwell filter: {e}")
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            with open(log_file, "w") as f:
+                f.write(f"⚠️ Could not apply Maxwell filter: {e}\n")
+                f.write(f"Timestamp: {timestamp}\n\n")
+                f.write("Error message:\n")
+                f.write(str(e) + "\n\n")
+                f.write("Traceback:\n")
+                f.write(traceback.format_exc())   
         # Rename path2raw to facilitate naming conventions
         path2raw = tsss_raw_path
         path2raw_erm = tsss_erm_path
         
         # ---- PSD after tSSS ----
-        fig = raw.compute_psd(fmax=250,
+        fig = raw.compute_psd(fmax=180,
                 method="welch", picks=['meg'],
                 n_fft=int(4 * raw.info["sfreq"]),     # 4-second window
                 n_overlap=int(2 * raw.info["sfreq"]),     # 50% overlap (2-second)
                 average='mean',
                 window='hann').plot(picks="data", exclude="bads", amplitude=True, show=False)
-        report.add_figure(fig=fig, title="PSD after tSSS")
+        report.add_figure(fig=fig, title=f"PSD after tSSS, eSSS:{eSSS}")
         
     else:
         print("→ System set to CTF: skipping tSSS/Maxwell filtering; using input data directly.")
@@ -563,11 +683,31 @@ def preprocess_subject(
         raw.crop(tmin=crop_tmin[1], tmax=crop_tmax[1])
     except Exception as e:
         print(f"⚠️ Raw cropping failed: {e}")
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        with open(log_file, "w") as f:
+            f.write("⚠️ Raw cropping failed: \n")
+            f.write(f"Timestamp: {timestamp}\n\n")
+            f.write("Error message:\n")
+            f.write(str(e) + "\n\n")
+            f.write("Traceback:\n")
+            f.write(traceback.format_exc())
         
     try:
         raw_erm.crop(tmin=crop_tmin[0], tmax=crop_tmax[0])
     except Exception as e:
         print(f"⚠️ Empty room cropping failed: {e}")
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        with open(log_file, "w") as f:
+            f.write("⚠️ Empty room cropping failed: \n")
+            f.write(f"Timestamp: {timestamp}\n\n")
+            f.write("Error message:\n")
+            f.write(str(e) + "\n\n")
+            f.write("Traceback:\n")
+            f.write(traceback.format_exc())
+
+
 
     # ---- Filtering & notch ----
     print(f"→ Filtering {l_freq}-{h_freq} Hz, notch {line_freqs}")
@@ -579,7 +719,7 @@ def preprocess_subject(
         print(f"→ Downsampling to {downsample} Hz")
         raw.resample(downsample)
         raw_erm.resample(downsample)
-        fig = raw.compute_psd(fmax=200,
+        fig = raw.compute_psd(fmax=180,
             method="welch",
             n_fft=int(4 * raw.info["sfreq"]),     # 4-second window
             n_overlap=int(2 * raw.info["sfreq"]),     # 50% overlap (2-second)
@@ -601,19 +741,63 @@ def preprocess_subject(
         report.add_figure(fig, title="ECG events")
     except Exception as e:
         print(f"⚠️ ECG QC failed: {e}")
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        with open(log_file, "w") as f:
+            f.write("⚠️ ECQ QC failed: \n")
+            f.write(f"Timestamp: {timestamp}\n\n")
+            f.write("Error message:\n")
+            f.write(str(e) + "\n\n")
+            f.write("Traceback:\n")
+            f.write(traceback.format_exc())
     try:
         eog_ev = mne.preprocessing.create_eog_epochs(raw, ch_name=eog_ch).average()
         fig = eog_ev.plot_joint(show=False)
         report.add_figure(fig, title="EOG events")
+    
     except Exception as e:
         print(f"⚠️ EOG QC failed: {e}")
 
-    
-    # ---- ERM-based SSP ----
-    try:
-        print("→ Applying SSP")
-        er_proj = mne.compute_proj_raw(raw_erm, n_grad=0, n_mag=3, verbose=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        with open(log_file, "w") as f:
+            f.write("⚠️ EOC QC failed \n")
+            f.write(f"Timestamp: {timestamp}\n\n")
+            f.write("Error message:\n")
+            f.write(str(e) + "\n\n")
+            f.write("Traceback:\n")
+            f.write(traceback.format_exc())
 
+    
+    # ---- SSP ----
+    try:
+        
+        print("→ Applying SSP")
+        # ERM SSP can be broadband or computed from a specific band
+        erm_for_ssp = raw_erm
+        if erm_ssp_band != "broad":
+            if not isinstance(erm_ssp_band, (list, tuple)) or len(erm_ssp_band) != 2:
+                raise ValueError("erm_ssp_band must be 'broad' or [low, high]")
+            low, high = erm_ssp_band
+            print(f"→ Computing ERM SSP using filtered band {low}-{high} Hz")
+            erm_ssp_caption = f"Band-limited ERM SSP projectors extracted after filtering the ERM from {low} to {high} Hz."
+            erm_for_ssp = raw_erm.copy().filter(l_freq=low, h_freq=high)
+        else:
+            print("→ Computing ERM SSP using broadband ERM (no filtering)")
+            erm_ssp_caption = "Broadband ERM SSP projectors; no additional ERM filtering was applied before SSP extraction."
+        er_proj = mne.compute_proj_raw(erm_for_ssp, n_grad=3, n_mag=3, verbose=True)
+        
+        er_exp_var = []
+        for proj in er_proj:
+            if "explained_var" in proj:
+                er_exp_var.append(f"{np.round(proj['explained_var'], 2)}%")
+
+        fig = mne.viz.plot_projs_topomap(er_proj, info=raw_erm.info, show=False)
+        fig.suptitle("ERM SSP projectors")
+        report.add_figure(
+            fig,
+            title="ERM Projections",
+            caption=f"{erm_ssp_caption} Explained variance: {', '.join(er_exp_var) if er_exp_var else 'not available'}."
+        )
 
         # Create SSP ecg/eog projectors
         ecg_proj, ecg_array = mne.preprocessing.compute_proj_ecg(raw,n_grad=3,n_mag=3, reject=None) # For ECG proj, first pca is always enough
@@ -634,7 +818,7 @@ def preprocess_subject(
             exp_var.append('%, ')
         report.add_figure(fig, title='Eog Projections', caption = f"{', '.join(exp_var)} — num of proj selected = {num_proj[1]}")
 
-        # EOG/ECG projections
+        # EOG/ECG projections are added after ERM SSP projectors
         for i in range(0,num_proj[0]):
             raw.add_proj(ecg_proj[i]) #For ECG proj, first pca is always enough
             raw_erm.add_proj(ecg_proj[i]) 
@@ -643,11 +827,23 @@ def preprocess_subject(
             raw.add_proj(eog_proj[i]) #For EOG proj, first pca seems enough
             raw_erm.add_proj(eog_proj[i])
 
+        for i in range(0,num_proj[0]):
+            raw.add_proj(er_proj[i]) #For ECG proj, first pca is always enough
+            raw_erm.add_proj(er_proj[i]) 
+
         raw.apply_proj()
         raw_erm.apply_proj()
     except Exception as e:
         print(f"⚠️ SSP computation failed: {e}")
 
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        with open(log_file, "w") as f:
+            f.write("⚠️ SSP computation failed: \n")
+            f.write(f"Timestamp: {timestamp}\n\n")
+            f.write("Error message:\n")
+            f.write(str(e) + "\n\n")
+            f.write("Traceback:\n")
+            f.write(traceback.format_exc())
 
     # --- Amplitude and gradient thresholds ----
     try:
@@ -669,7 +865,7 @@ def preprocess_subject(
         raw.set_annotations(ann + raw.annotations)
         raw.load_data() # Ensure BAD segments are masked
 
-        fig = raw.compute_psd(fmax=200).plot(picks="data", exclude="bads", amplitude=True, show=False)
+        fig = raw.compute_psd(fmax=180).plot(picks="data", exclude="bads", amplitude=True, show=False)
 
         report.add_figure(fig, title="PSD after MAD")
         
@@ -689,7 +885,15 @@ def preprocess_subject(
     
     except Exception as e:
         print(f"⚠️ MAD failed: {e}")
-    
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        with open(log_file, "w") as f:
+            f.write("⚠️ MAD failed: \n")
+            f.write(f"Timestamp: {timestamp}\n\n")
+            f.write("Error message:\n")
+            f.write(str(e) + "\n\n")
+            f.write("Traceback:\n")
+            f.write(traceback.format_exc())
 
     # ---- Data and noise covariance ----
     print("→ Data and noise covariance")
@@ -711,8 +915,8 @@ def preprocess_subject(
     # ---- Coregistration metrics + report visualization ----
     print("→ Coregistration")
 
-    trans_path = os.path.join(meg_dir, f"{subject}-{session}-corr_trans.fif")
-    trans_path = trans_path if os.path.isfile(trans_path) else os.path.join(meg_dir, f"{subject}_{session}-corr_trans.fif")
+    trans_path = os.path.join(meg_dir, f"{subject}-{session}{trans}")
+    trans_path = trans_path if os.path.isfile(trans_path) else os.path.join(meg_dir, f"{subject}_{session}{trans}")
        
 
     if os.path.exists(trans_path):
@@ -720,40 +924,37 @@ def preprocess_subject(
         trans = mne.read_trans(trans_path)
 
         # Compute dig → MRI distances
-        distances = mne.dig_mri_distances(
-            info=raw.info,
-            trans=trans,
-            subject=subject,
-            subjects_dir=fs_dir
-        )
+        # distances = mne.dig_mri_distances( info=raw.info, trans=trans, subject=fs_subject,subjects_dir=fs_dir)
 
-        mean_distance_mm = np.mean(distances) * 1000
-        std_distance_mm  = np.std(distances)  * 1000
+        #mean_distance_mm = np.mean(distances) * 1000
+        #std_distance_mm  = np.std(distances)  * 1000
 
         #note = f"Distance: {mean_distance_mm:.2f} +- {std_distance_mm:.2f} mm"
 
         report.add_trans(
             trans=trans_path,
             info=raw.info,
-            subject=subject,
+            subject=fs_subject,
             subjects_dir=fs_dir,
             plot_kwargs=dict(surfaces='head-dense',
             mri_fiducials=True, meg={"helmet": 0.1, "sensors": 0.1, "ref": 1}),
             title='Coregistration',
             alpha=1
         )
+
     else:
         print(f"⚠️ Missing trans file: {trans_path}")
+    
 
     # ---- BEM ----
-    bem_path = os.path.join(fs_dir, subject, "bem", f"{subject}-5120-5120-5120-bem-sol.fif")
+    bem_path = os.path.join(fs_dir, fs_subject, "bem", f"{subject}-5120-5120-5120-bem-sol.fif")
     bem_dir = os.path.join(fs_dir, "bem")
     src_path = os.path.join(deriv_dir, Path(os.path.basename(path2raw)).stem + "_src.fif")
 
     if compute_bem_if_missing and not os.path.exists(bem_path):
         os.makedirs(bem_dir, exist_ok=True)
         conductivity = (0.3,)   # Single layer for MEG
-        model = mne.make_bem_model(subject=subject, ico=4, #The surface ico downsampling to use, e.g. 5=20484, 4=5120, 3=1280. If None, no subsampling is applied.
+        model = mne.make_bem_model(subject=fs_subject, ico=4, #The surface ico downsampling to use, e.g. 5=20484, 4=5120, 3=1280. If None, no subsampling is applied.
                             conductivity=conductivity, 
                             subjects_dir=fs_dir) #bem conductivity model
         bem_sol = mne.make_bem_solution(model)
@@ -761,15 +962,24 @@ def preprocess_subject(
         if bem_watershed:
             print("→ Creating watershed BEM (if missing)...")
             try:
-                mne.bem.make_watershed_bem(subject=subject, subjects_dir=fs_dir, overwrite=True)
-                mne.bem.make_scalp_surfaces(subject=subject, subjects_dir=fs_dir, overwrite=True) #Creates the high resolution -head-dense.fif
+                mne.bem.make_watershed_bem(subject=fs_subject, subjects_dir=fs_dir, overwrite=True)
+                mne.bem.make_scalp_surfaces(subject=fs_subject, subjects_dir=fs_dir, overwrite=True) #Creates the high resolution -head-dense.fif
 
             except Exception as e:
                 print(f"⚠️ Watershed BEM failed: {e}")
 
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                with open(log_file, "w") as f:
+                    f.write("⚠️ Watershed BEM failed: \n")
+                    f.write(f"Timestamp: {timestamp}\n\n")
+                    f.write("Error message:\n")
+                    f.write(str(e) + "\n\n")
+                    f.write("Traceback:\n")
+                    f.write(traceback.format_exc())
+
     if not os.path.exists(src_path):
         print("→ Setting up source space...")
-        src = mne.setup_source_space(subject=subject, subjects_dir=fs_dir, add_dist="patch")
+        src = mne.setup_source_space(subject=fs_subject, subjects_dir=fs_dir, add_dist="patch")
         src.save(src_path, overwrite=True)
     else:
         src = mne.read_source_spaces(src_path)
@@ -777,12 +987,12 @@ def preprocess_subject(
     # ---- BEM / alignment QC ----
     try:
         # Plot BEM (2D slices)
-        fig = mne.viz.plot_bem(subject=subject, subjects_dir=fs_dir, src=src)
+        fig = mne.viz.plot_bem(subject=fs_subject, subjects_dir=fs_dir, src=src)
         report.add_figure(fig, title="Sources on BEM")
 
         # Plot 3D alignment (no 'show' kwarg)
         fig = mne.viz.plot_alignment(
-            subject=subject,
+            subject=fs_subject,
             subjects_dir=fs_dir,
             surfaces="white", #white becuase mne use white for sourse reconstruction? 
             coord_frame="mri",
@@ -799,6 +1009,15 @@ def preprocess_subject(
     except Exception as e:
         print(f"⚠️ BEM/alignment plots failed: {e}")
 
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        with open(log_file, "w") as f:
+            f.write("⚠️ BEM/alignment plots failed: \n")
+            f.write(f"Timestamp: {timestamp}\n\n")
+            f.write("Error message:\n")
+            f.write(str(e) + "\n\n")
+            f.write("Traceback:\n")
+            f.write(traceback.format_exc())
+
     # ---- Forward ----
 
     try:
@@ -809,6 +1028,15 @@ def preprocess_subject(
 
     except Exception as e:
         print(f"⚠️ Foward solution failed: {e}")
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        with open(log_file, "w") as f:
+            f.write("⚠️ Forward solution failed: \n")
+            f.write(f"Timestamp: {timestamp}\n\n")
+            f.write("Error message:\n")
+            f.write(str(e) + "\n\n")
+            f.write("Traceback:\n")
+            f.write(traceback.format_exc())
 
     # ---- Inverse ----
 
@@ -840,9 +1068,8 @@ def preprocess_subject(
             # Silence annoying joblib warnings
             os.environ["JOBLIB_TEMP_FOLDER"] = "/tmp"
             os.environ["JOBLIB_NO_MPI"] = "1"
-            raw.crop(tmin=30, tmax=130)
             # if STC does not exist: compute it
-            if not os.path.exists(stc_path + "-lh.stc"):
+            if not os.path.exists(stc_path + "-lh.stc") or overwrite:
                 print("→ Forward solution...")
                 print(f"→ Inverse operator ({inv_method})...")
 
@@ -862,15 +1089,24 @@ def preprocess_subject(
                 except Exception as e:
                     print(f"⚠️ Could not save STC: {e}")
 
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    with open(log_file, "w") as f:
+                        f.write("⚠️ Could not save STC: \n")
+                        f.write(f"Timestamp: {timestamp}\n\n")
+                        f.write("Error message:\n")
+                        f.write(str(e) + "\n\n")
+                        f.write("Traceback:\n")
+                        f.write(traceback.format_exc())
+
             else:
                 print(f"→ Reading existing STC ({inv_method})...")
                 stc = mne.read_source_estimate(stc_path)
 
         # ------------------ BEAMFORMER ------------------
         else:
-            if not os.path.exists(stc_path + "-lh.stc"):
+            if not os.path.exists(stc_path + "-lh.stc") or overwrite:
                 print(f"→ Computing Source Estimation {inv_method}")
-                start, stop = raw.time_as_index([crop_tmin[0],crop_tmax[0]])
+                start, stop = raw.time_as_index([0,crop_tmax[1]-crop_tmin[1]])
 
                 #Whats all this hyperparameters?! Make it more clear to you and everyone
                 filters = mne.beamformer.make_lcmv(
@@ -886,12 +1122,22 @@ def preprocess_subject(
 
                 stc = mne.beamformer.apply_lcmv_raw(raw, filters,
                                                     start=start, stop=stop)
+                
 
                 try:
                     stc.save(stc_path, overwrite=True)
                     print(f"→ STC saved at {stc_path}")
                 except Exception as e:
                     print(f"⚠️ Could not save STC: {e}")
+
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    with open(log_file, "w") as f:
+                        f.write("⚠️ Could not save STC: \n")
+                        f.write(f"Timestamp: {timestamp}\n\n")
+                        f.write("Error message:\n")
+                        f.write(str(e) + "\n\n")
+                        f.write("Traceback:\n")
+                        f.write(traceback.format_exc())
 
             else:
                 print("→ Reading Beamformer STC...")
@@ -916,7 +1162,7 @@ def preprocess_subject(
 
         surfer_kwargs = dict(surface='pial',
                         hemi='split',
-                        subject=subject, 
+                        subject=fs_subject, 
                         subjects_dir=fs_dir,
                         #views="medial",
                         colormap='jet',
@@ -933,7 +1179,7 @@ def preprocess_subject(
             surfer_kwargs['hemi']='split'
             # SourceEstimate per band
             stc_band = mne.SourceEstimate(power, vertices=stc.vertices,
-                                          tmin=0, tstep=.25, subject=subject)
+                                          tmin=0, tstep=.25, subject=fs_subject)
 
             # stc_band_morph = morph.apply(stc_band)
             clim = dict(kind="value", lims=[.0* max(power), 0.4 * max(power), .8 * max(power)])
@@ -980,7 +1226,7 @@ def preprocess_subject(
         report_path = os.path.join(report_dir, Path(os.path.basename(path2raw)).stem + "_QC_report.html")
         # Ensure directory exists
         os.makedirs(report_dir, exist_ok=True)
-        fig_path = os.path.join(report_dir, f"PSD_band_dist" + Path(os.path.basename(path2raw)).stem + ".png")
+        fig_path = os.path.join(report_dir, "PSD_band_dist" + Path(os.path.basename(path2raw)).stem + ".png")
         plt.savefig(fig_path, dpi=300, bbox_inches='tight')
         plt.close('all')
         report.add_figure(plt.figure(), title="Spectrally Resolved Source Estimation (placeholder panel)")
@@ -999,13 +1245,15 @@ def _parse_args():
     p.add_argument("--root_dir", required=True, type=str)
     p.add_argument("--subject_id", required=True, type=str)
     p.add_argument("--session", default=None, required=False, help="Session (e.g., 20241217 or ses-20241217). Optional for MNE-style naming.")
+    p.add_argument("--suffix", type=str, default=None, help="Optional FreeSurfer subject suffix (e.g., 'ses-01_run-2' for multiple T1w runs.")
     p.add_argument("--resting", default='rest1', required=False, help="Backward-compatible alias for --task (e.g., rest1/rest2).")
     p.add_argument("--task", default=None, required=False, help="Generic task name. Examples: rest, msit, somatoauditory1, rest1.")
+    p.add_argument("--trans", type= str, default='-corr_trans.fif', required=False, help="Generic corregistration file sufix. Examples: -corr_trans.fif, _hsp_ready.fif")
     p.add_argument("--run", type=str, default=None, required=False,
                    help="BIDS run identifier. Accepts: 1, 01, run-1, run-01.")
     p.add_argument("--in_file", type=str, default=None, required=False, help="Explicit path to input FIF (overrides auto-discovery).")
     p.add_argument("--prefer", type=str, default="any",
-                   help="Preference token when multiple FIFs match: 'any', 'raw', or any substring to prefer (e.g., digFiltered, channels_removed).")
+                   help="Preference token when multiple match: 'any', 'raw', or any substring to prefer (e.g., digFiltered, channels_removed).")
     p.add_argument("--erm_file", type=str, default=None, required=False, help="Explicit path to ERM FIF (overrides auto-discovery).")
     p.add_argument("--system", type=str, default="MEGIN", choices=["MEGIN", "CTF"], help="Acquisition system. Controls file extensions and tSSS application.")
     p.add_argument("--task_basename", type=str, default="{sub}_{task}_raw.fif")
@@ -1017,12 +1265,13 @@ def _parse_args():
     p.add_argument("--h_freq", type=float, default=200.0)
     p.add_argument("--line_freqs", type=float, nargs="*", default=[60, 120, 180])
     p.add_argument("--downsample", type=int, default=500)
-    p.add_argument("--crop_tmin", type=float, nargs=2, default=[0.0, 30.0])
-    p.add_argument("--crop_tmax", type=float, nargs=2, default=[300.0, 300.0])
+    p.add_argument("--crop_tmin", type=float, nargs=2, default=[10.0, 10.0])
+    p.add_argument("--crop_tmax", type=float, nargs=2, default=[110.0, 250.0])
     p.add_argument("--ecg_ch", type=str, default="ECG003")
     p.add_argument("--eog_ch", type=str, default="EOG001")
     p.add_argument("--reject_mag", type=float, default=4e-12)
     p.add_argument("--reject_grad", type=float, default=4000e-13)
+    p.add_argument("--eSSS", type=parse_ranges, default=None, required=False, help="Frequency ranges for eSSS as start-end pairs, e.g. 42-45,50-53")
     p.add_argument("--subjects_dir_name", type=str, default="MRI/freesurfer")
     p.add_argument("--compute_bem_if_missing", action="store_true", default=True)
     p.add_argument("--no_compute_bem_if_missing", dest="compute_bem_if_missing", action="store_false")
@@ -1031,10 +1280,13 @@ def _parse_args():
     p.add_argument("--inv_method", type=str, default="beamformer", choices=["MNE", "dSPM", "sLORETA","beamformer"])
     p.add_argument("--snr", type=float, default=3.0)
     p.add_argument("--n_jobs", type=int, default=8)
-    p.add_argument("--num_proj", type=int, default=[1,1])
+    p.add_argument("--num_proj", type=int, nargs=2, default=[1, 1], help="Number of ECG and EOG SSP projectors to apply, respectively. Example: --num_proj 1 1")
+    p.add_argument("--erm_ssp_band", type=str, default="broad", help="ERM band for SSP: 'broad' or low-high (e.g. 10-20)")
     # additional_bads como lista
     p.add_argument("--additional_bads", type=str, nargs="*", default=[])
     p.add_argument("--verbose", action="store_true", help="Enable verbose MNE output")
+    p.add_argument("--json", action = "store_true", help="Only true if .json file with fidutials exists AND was use to generete the coregistation automatically")
+    p.add_argument("--overwrite", action = "store_true", help="If called, it will overwrite all the *_tsss.fif, *.stc and report files, allong any other output.")
     return p.parse_args()
 
 
@@ -1077,11 +1329,20 @@ if __name__ == "__main__":
 
     print(f"ERM path: {erm_path}")
 
+    # Parse erm_ssp_band argument
+    if args.erm_ssp_band == "broad":
+        erm_ssp_band = "broad"
+    else:
+        low, high = args.erm_ssp_band.split("-")
+        erm_ssp_band = [float(low), float(high)]
+
     preprocess_subject(
         root_dir=args.root_dir,
         subject_id=args.subject_id,
         session=args.session,
+        suffix=args.suffix,
         task=task_label,
+        trans=args.trans,
         in_file=str(file_path),
         erm_file=str(erm_path),
         task_basename=args.task_basename,
@@ -1099,6 +1360,7 @@ if __name__ == "__main__":
         eog_ch=args.eog_ch,
         reject_mag=args.reject_mag,
         reject_grad=args.reject_grad,
+        eSSS=args.eSSS,
         subjects_dir_name=args.subjects_dir_name,
         compute_bem_if_missing=args.compute_bem_if_missing,
         bem_watershed=args.bem_watershed,
@@ -1107,6 +1369,9 @@ if __name__ == "__main__":
         additional_bads=tuple(args.additional_bads),
         n_jobs=args.n_jobs,
         num_proj=args.num_proj,
+        erm_ssp_band=erm_ssp_band,
         verbose=args.verbose,
         system=args.system,
+        json=args.json,
+        overwrite=args.overwrite,
     )

@@ -1,11 +1,13 @@
+import os
 import mne
+import pandas as pd
 from scipy.stats import median_abs_deviation
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 import re
 # Last modified 27/11/2025
-
+mne.set_log_level("ERROR")
 def read_data(fname):
     """
     Read MEG data in either .fif or .ds format.
@@ -39,6 +41,99 @@ def read_data(fname):
     # Fix coil types (recommended by MNE)
     mne.channels.fix_mag_coil_types(raw.info)
     return raw
+
+def compute_head_movement_report(raw, report, subject_id, deriv_dir, system):
+
+    # ---- Output directory ----
+    out_dir = os.path.join(deriv_dir, "head_movement")
+    os.makedirs(out_dir, exist_ok=True)
+
+    out_csv = os.path.join(out_dir, f"{subject_id}_head_movement_timeseries.csv")
+    out_metrics_csv = os.path.join(out_dir, f"{subject_id}_head_movement_metrics.csv")
+
+    # ---- Compute head position (system-dependent) ----
+
+    if system == "CTF":
+        print("Using CTF head localization (HLC channels)")
+        chpi_locs = mne.chpi.extract_chpi_locs_ctf(raw)
+
+    elif system == "MEGIN":
+        print("Using MEGIN cHPI pipeline")
+        chpi_amplitudes = mne.chpi.compute_chpi_amplitudes(raw)
+        chpi_locs = mne.chpi.compute_chpi_locs(raw.info, chpi_amplitudes)
+
+    else:
+        raise ValueError(f"Unsupported system: {system}")
+
+    head_pos = mne.chpi.compute_head_pos(raw.info, chpi_locs, verbose=True)
+
+    # ---- Extract translation ----
+    time = head_pos[:, 0]
+    xyz = head_pos[:, 4:7]  # meters
+
+    # ---- Displacement relative to start ----
+    xyz0 = xyz[0, :]
+    disp_xyz = xyz - xyz0
+
+    disp_xyz_mm = disp_xyz * 1000
+    distance_mm = np.linalg.norm(disp_xyz_mm, axis=1)
+
+    # ---- Save time series CSV ----
+    df = pd.DataFrame({
+        "time_s": time,
+        "x_mm": disp_xyz_mm[:, 0],
+        "y_mm": disp_xyz_mm[:, 1],
+        "z_mm": disp_xyz_mm[:, 2],
+        "distance_mm": distance_mm,
+    })
+    df.to_csv(out_csv, index=False)
+
+    # ---- Metrics ----
+    metrics = {
+        "subject_id": subject_id,
+        "rms_x_mm": np.sqrt(np.mean(disp_xyz_mm[:, 0] ** 2)),
+        "rms_y_mm": np.sqrt(np.mean(disp_xyz_mm[:, 1] ** 2)),
+        "rms_z_mm": np.sqrt(np.mean(disp_xyz_mm[:, 2] ** 2)),
+        "rms_distance_mm": np.sqrt(np.mean(distance_mm ** 2)),
+        "max_abs_x_mm": np.max(np.abs(disp_xyz_mm[:, 0])),
+        "max_abs_y_mm": np.max(np.abs(disp_xyz_mm[:, 1])),
+        "max_abs_z_mm": np.max(np.abs(disp_xyz_mm[:, 2])),
+        "max_distance_mm": np.max(distance_mm),
+        "mean_distance_mm": np.mean(distance_mm),
+        "median_distance_mm": np.median(distance_mm),
+    }
+
+    metrics_df = pd.DataFrame([metrics])
+    metrics_df.to_csv(out_metrics_csv, index=False)
+
+    # ---- Plot ----
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    ax.plot(time, disp_xyz_mm[:, 0], label="X")
+    ax.plot(time, disp_xyz_mm[:, 1], label="Y")
+    ax.plot(time, disp_xyz_mm[:, 2], label="Z")
+    ax.plot(time, distance_mm, label="Distance", linewidth=2)
+
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Displacement (mm, relative to start)")
+    ax.set_title(f"Head movement: {subject_id}")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    # ---- Add to report ----
+    report.add_figure(
+        fig=fig,
+        title=f"{subject_id} head movement",
+        section="Head movement",
+        tags=("head-movement", subject_id),
+    )
+
+    report.add_html(
+        title=f"{subject_id} movement metrics",
+        html=metrics_df.to_html(index=False, float_format="%.3f"),
+        section="Head movement",
+        tags=("head-movement", subject_id, "metrics"),
+    )
 
 
 def compute_noise_cov(er_fname, raw, calibration, cross_talk):
@@ -79,7 +174,7 @@ def compute_head_position(raw):
     return head_pos
 
 
-def max_filter(raw, calibration, cross_talk, st_duration, head_pos):
+def max_filter(raw, calibration, cross_talk, st_duration, head_pos, extended_proj):
     # Fine calibration file?
     # Crosstalk file?
     # Spatiotemporal or just spatial?
@@ -98,6 +193,7 @@ def max_filter(raw, calibration, cross_talk, st_duration, head_pos):
         cross_talk=cross_talk,
         st_duration=st_duration,
         coord_frame=coord_frame,
+        extended_proj = extended_proj,
     )
     return raw
 
