@@ -17,6 +17,7 @@ Example:
 import os
 import argparse
 from pathlib import Path
+from typing import Literal
 import glob
 import re
 import matplotlib
@@ -379,8 +380,12 @@ def preprocess_subject(
     bands: dict = None,
     additional_bads: tuple = (),
     n_jobs: int = 8,
-    num_proj: tuple = (1,1), # ECG and EOG proj
-    erm_ssp_band: str | list = "broad",
+    num_proj_eog: tuple = (1,1), # ECG and EOG proj
+    num_proj_ecg: tuple = (1,1), # ECG and EOG proj
+    num_proj_erm: tuple = (1,1), # SSP empty room
+    num_proj_raw: tuple = (1,1), # SSP generic raw
+    erm_ssp_band: Literal["broad"] | tuple[float, float] | None = None,
+    raw_ssp_band : str | None = None,
     verbose: bool = False,
     system: str = "MEGIN",
     json: bool = False,
@@ -773,32 +778,60 @@ def preprocess_subject(
         
         print("→ Applying SSP")
         # ERM SSP can be broadband or computed from a specific band
-        erm_for_ssp = raw_erm
-        if erm_ssp_band != "broad":
-            if not isinstance(erm_ssp_band, (list, tuple)) or len(erm_ssp_band) != 2:
-                raise ValueError("erm_ssp_band must be 'broad' or [low, high]")
-            low, high = erm_ssp_band
-            print(f"→ Computing ERM SSP using filtered band {low}-{high} Hz")
-            erm_ssp_caption = f"Band-limited ERM SSP projectors extracted after filtering the ERM from {low} to {high} Hz."
-            erm_for_ssp = raw_erm.copy().filter(l_freq=low, h_freq=high)
-        else:
-            print("→ Computing ERM SSP using broadband ERM (no filtering)")
-            erm_ssp_caption = "Broadband ERM SSP projectors; no additional ERM filtering was applied before SSP extraction."
-        er_proj = mne.compute_proj_raw(erm_for_ssp, n_grad=3, n_mag=3, verbose=True)
-        
-        er_exp_var = []
-        for proj in er_proj:
-            if "explained_var" in proj:
-                er_exp_var.append(f"{np.round(proj['explained_var'], 2)}%")
+        if erm_ssp_band: #To avoid TSSS reduncancy, this is only run if called! 
+            erm_for_ssp = raw_erm.copy()
+            if erm_ssp_band != "broad":
+                if not isinstance(erm_ssp_band, (list, tuple)) or len(erm_ssp_band) != 2:
+                    raise ValueError("erm_ssp_band must be 'broad' or [low, high]")
+                low, high = erm_ssp_band
+                print(f"→ Computing ERM SSP using filtered band {low}-{high} Hz")
+                erm_ssp_caption = f"Band-limited ERM SSP projectors extracted after filtering the ERM from {low} to {high} Hz."
+                erm_for_ssp = raw_erm.copy().filter(l_freq=low, h_freq=high)
+            else:
+                print("→ Computing ERM SSP using broadband ERM (no filtering)")
+                erm_ssp_caption = "Broadband ERM SSP projectors; no additional ERM filtering was applied before SSP extraction."
+            er_proj = mne.compute_proj_raw(erm_for_ssp, n_grad=3, n_mag=3, verbose=False)
+            
+            er_exp_var = []
+            for proj in er_proj:
+                if "explained_var" in proj:
+                    er_exp_var.append(f"{np.round(proj['explained_var'], 2)}%")
 
-        fig = mne.viz.plot_projs_topomap(er_proj, info=raw_erm.info, show=False)
-        fig.suptitle("ERM SSP projectors")
-        report.add_figure(
-            fig,
-            title="ERM Projections",
-            caption=f"{erm_ssp_caption} Explained variance: {', '.join(er_exp_var) if er_exp_var else 'not available'}."
-        )
+            fig = mne.viz.plot_projs_topomap(er_proj, info=raw_erm.info, show=False)
+            fig.suptitle("ERM SSP projectors")
+            report.add_figure(
+                fig,
+                title="ERM Projections",
+                caption = (f"{erm_ssp_caption}\n"
+                           f"Explained variance: {er_exp_var}\n"
+                           f"Num of projections selected: {num_proj_erm[0]}")
+            )
 
+        if raw_ssp_band: 
+            generic_proj = []
+            for i, (low, high) in enumerate(raw_ssp_band):
+                print(f"→ Computing generic (raw) SSP using filtered band {low}-{high} Hz")
+                filt_raw = raw.copy().filter(l_freq=low, h_freq=high)
+                # You can customize number of components per band
+                proj = mne.compute_proj_raw(filt_raw, n_grad=3, n_mag=3, verbose=False)
+                generic_proj.extend(proj)
+            
+            generic_exp_var = []
+            for proj in generic_proj:
+                if "explained_var" in proj:
+                    generic_exp_var.append(f"{np.round(proj['explained_var'], 2)}%")
+
+            generic_ssp_caption = f"Band-limited SSP projectors extracted after filtering the subjects MEG from {raw_ssp_band} Hz."
+
+            fig = mne.viz.plot_projs_topomap(generic_proj, info=raw.info, show=False)
+            fig.suptitle("ERM SSP projectors")
+            report.add_figure(
+                fig,
+                title="Generic Raw Projections",
+                caption = (f"{generic_ssp_caption}\n"
+                           f"Explained variance: {generic_exp_var}\n"
+                           f"Num of projections selected: {num_proj_raw[0]}")
+            )
         # Create SSP ecg/eog projectors
         ecg_proj, ecg_array = mne.preprocessing.compute_proj_ecg(raw,n_grad=3,n_mag=3, reject=None) # For ECG proj, first pca is always enough
         fig = mne.viz.plot_projs_joint(ecg_proj, ecg_ev, show=False)
@@ -807,7 +840,7 @@ def preprocess_subject(
         for i in range(len(ecg_proj)):
             exp_var.append(str(np.round(ecg_proj[i]['explained_var'],2)))
             exp_var.append('%, ')
-        report.add_figure(fig, title='Ecg Projections', caption = f"{', '.join(exp_var)} — num of proj selected = {num_proj[0]}")
+        report.add_figure(fig, title='Ecg Projections', caption = f"{', '.join(exp_var)} — num of proj selected = {num_proj_ecg[0]}")
             
         eog_proj, eog_array = mne.preprocessing.compute_proj_eog(raw,n_grad=3,n_mag=3, reject=None) # Default options look fine
         fig = mne.viz.plot_projs_joint(eog_proj, eog_ev, show=False)
@@ -816,20 +849,29 @@ def preprocess_subject(
         for i in range(len(eog_proj)):
             exp_var.append(str(np.round(eog_proj[i]['explained_var'],2)))
             exp_var.append('%, ')
-        report.add_figure(fig, title='Eog Projections', caption = f"{', '.join(exp_var)} — num of proj selected = {num_proj[1]}")
+        report.add_figure(fig, title='Eog Projections', caption = f"{', '.join(exp_var)} — num of proj selected = {num_proj_eog[1]}")
 
         # EOG/ECG projections are added after ERM SSP projectors
-        for i in range(0,num_proj[0]):
+        for i in range(0,num_proj_ecg[0]):
             raw.add_proj(ecg_proj[i]) #For ECG proj, first pca is always enough
             raw_erm.add_proj(ecg_proj[i]) 
 
-        for i in range(0,num_proj[1]):
+        for i in range(0,num_proj_eog[1]):
             raw.add_proj(eog_proj[i]) #For EOG proj, first pca seems enough
             raw_erm.add_proj(eog_proj[i])
+        
+        if erm_ssp_band:
+            for i in range(0,num_proj_erm[0]):
+                raw.add_proj(er_proj[i]) 
+                raw_erm.add_proj(er_proj[i]) 
 
-        for i in range(0,num_proj[0]):
-            raw.add_proj(er_proj[i]) #For ECG proj, first pca is always enough
-            raw_erm.add_proj(er_proj[i]) 
+        if raw_ssp_band:
+            for i in range(0,num_proj_raw[0]):
+                for j, (low, high) in enumerate(raw_ssp_band):
+                    raw.add_proj(generic_proj[i]) 
+                    raw_erm.add_proj(generic_proj[i]) 
+                    raw.add_proj(generic_proj[i+(j*3)]) # 3 becuase that is the number of projections computed (ngrad=3, nmag=3) per band 
+                    raw_erm.add_proj(generic_proj[i+(j*3)]) 
 
         raw.apply_proj()
         raw_erm.apply_proj()
@@ -1280,8 +1322,12 @@ def _parse_args():
     p.add_argument("--inv_method", type=str, default="beamformer", choices=["MNE", "dSPM", "sLORETA","beamformer"])
     p.add_argument("--snr", type=float, default=3.0)
     p.add_argument("--n_jobs", type=int, default=8)
-    p.add_argument("--num_proj", type=int, nargs=2, default=[1, 1], help="Number of ECG and EOG SSP projectors to apply, respectively. Example: --num_proj 1 1")
-    p.add_argument("--erm_ssp_band", type=str, default="broad", help="ERM band for SSP: 'broad' or low-high (e.g. 10-20)")
+    p.add_argument("--num_proj_eog", type=int, nargs=2, default=[1, 1], help="Number of ECG and EOG SSP projectors to apply, respectively. Example: --num_proj 1 1")
+    p.add_argument("--num_proj_ecg", type=int, nargs=2, default=[1, 1], help="Number of ECG and EOG SSP projectors to apply, respectively. Example: --num_proj 1 1")
+    p.add_argument("--num_proj_erm", type=int, nargs=2, default=[1, 1], help="Number of ECG and EOG SSP projectors to apply, respectively. Example: --num_proj 1 1")
+    p.add_argument("--num_proj_raw", type=int, nargs=2, default=[1, 1], help="Number of ECG and EOG SSP projectors to apply, respectively. Example: --num_proj 1 1")
+    p.add_argument("--erm_ssp_band", type=str, default=None, help="ERM band for SSP: 'broad' or low-high (e.g. 10-20)")
+    p.add_argument("--raw_ssp_band", type=parse_ranges, default=None, required=False, help="Frequency ranges for generic SSP as start-end pairs, e.g. 42-45,50-53")
     # additional_bads como lista
     p.add_argument("--additional_bads", type=str, nargs="*", default=[])
     p.add_argument("--verbose", action="store_true", help="Enable verbose MNE output")
@@ -1370,6 +1416,7 @@ if __name__ == "__main__":
         n_jobs=args.n_jobs,
         num_proj=args.num_proj,
         erm_ssp_band=erm_ssp_band,
+        raw_ssp_band=args.raw_ssp_band,
         verbose=args.verbose,
         system=args.system,
         json=args.json,
