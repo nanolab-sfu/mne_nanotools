@@ -3,7 +3,7 @@
 """
 Generic task-free MEGIN preprocessing with ERM-SSP, tSSS, QC report, and bandwise source PSDs.
 
-Version 0.1.3 - Last modified 21/01/2026
+Version 0.1.3 - Last modified 04/05/2026
 
 Example:
     python generic_taskfree_MEGIN.py \
@@ -1414,7 +1414,10 @@ if __name__ == "__main__":
         snr=args.snr,
         additional_bads=tuple(args.additional_bads),
         n_jobs=args.n_jobs,
-        num_proj=args.num_proj,
+        num_proj_eog=args.num_proj_eog,
+        num_proj_ecg=args.num_proj_ecg,
+        num_proj_erm=args.num_proj_erm,
+        num_proj_raw=args.num_proj_raw,
         erm_ssp_band=erm_ssp_band,
         raw_ssp_band=args.raw_ssp_band,
         verbose=args.verbose,
