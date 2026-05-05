@@ -731,7 +731,7 @@ def preprocess_subject(
             average='mean',
             window='hann').plot(picks="data", exclude="bads", amplitude=True, show=False)
 
-        report.add_figure(fig, title=f"PSD after filters + downsample ({downsample} Hz)")
+        report.add_figure(fig, title=f"PSD after bandpass filter {l_freq}-{h_freq} + downsample ({downsample} Hz)")
 
     # ---- Additional bad channels ----
     if additional_bads:
