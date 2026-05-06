@@ -65,7 +65,7 @@ def compute_head_movement_report(raw, report, subject_id, deriv_dir, system):
     else:
         raise ValueError(f"Unsupported system: {system}")
 
-    head_pos = mne.chpi.compute_head_pos(raw.info, chpi_locs, verbose=True)
+    head_pos = mne.chpi.compute_head_pos(raw.info, chpi_locs, verbose=False)
 
     # ---- Extract translation ----
     time = head_pos[:, 0]
@@ -194,6 +194,7 @@ def max_filter(raw, calibration, cross_talk, st_duration, head_pos, extended_pro
         st_duration=st_duration,
         coord_frame=coord_frame,
         extended_proj = extended_proj,
+        verbose="ERROR",
     )
     return raw
 
