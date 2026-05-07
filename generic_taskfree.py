@@ -794,8 +794,31 @@ def preprocess_subject(
     # ---- SSP ----
     try:
         
-        print("→ Applying SSP")
-        
+        print("→ SSP configuration:")
+        print(f"   - ECG SSP: enabled | n_proj={num_proj_ecg} per available MEG type | n_grad=3, n_mag=3 | reject=None")
+        print(f"   - EOG SSP: enabled | n_proj={num_proj_eog} per available MEG type | n_grad=3, n_mag=3 | reject=None")
+
+        if erm_ssp_band:
+            if erm_ssp_band == "broad":
+                erm_ssp_desc = "broadband ERM"
+            else:
+                erm_ssp_desc = f"ERM filtered {erm_ssp_band[0]}-{erm_ssp_band[1]} Hz"
+            print(f"   - ERM SSP: enabled | {erm_ssp_desc} | n_proj={num_proj_erm} per available MEG type | n_grad=3, n_mag=3")
+        else:
+            print("   - ERM SSP: disabled")
+
+        if raw_ssp_band:
+            raw_ssp_desc = ", ".join([f"{low}-{high} Hz" for low, high in raw_ssp_band])
+            print(f"   - Generic raw SSP: enabled | bands={raw_ssp_desc} | n_proj={num_proj_raw} per band/per available MEG type | n_grad=3, n_mag=3")
+        else:
+            print("   - Generic raw SSP: disabled")
+
+        if bcglike_ssp:
+            print(f"   - Ballistocardiographic-like SSP: enabled | ECG-locked | filter=1.5-8 Hz | epoch=-0.2 to 0.5 s | n_proj={num_proj_bcglike} per available MEG type | n_grad=3, n_mag=3 | reject=None")
+        else:
+            print("   - Ballistocardiographic-like SSP: disabled")
+        #print("→ Computing ECG SSP — num of proj selected = {num_proj_ecg} ")   
+
         # Create SSP ecg/eog projectors
         ecg_proj, ecg_array = mne.preprocessing.compute_proj_ecg(raw,n_grad=3,n_mag=3, reject=None) # For ECG proj, first pca is always enough
         fig = mne.viz.plot_projs_joint(ecg_proj, ecg_ev, show=False)
@@ -804,8 +827,9 @@ def preprocess_subject(
         for i in range(len(ecg_proj)):
             exp_var.append(str(np.round(ecg_proj[i]['explained_var'],2)))
             exp_var.append('%, ')
-        report.add_figure(fig, title='Ecg Projections', caption = f"{', '.join(exp_var)} — num of proj selected = {num_proj_ecg[0]}")
+        report.add_figure(fig, title='Ecg Projections', caption = f"{', '.join(exp_var)} — num of proj selected = {num_proj_ecg}")
         
+        #print("→ Computing EOG SSP — num of proj selected = {num_proj_eog} ")   
         eog_proj, eog_array = mne.preprocessing.compute_proj_eog(raw,n_grad=3,n_mag=3, reject=None) # Default options look fine
         fig = mne.viz.plot_projs_joint(eog_proj, eog_ev, show=False)
         fig.suptitle("EOG projectors")
@@ -813,7 +837,7 @@ def preprocess_subject(
         for i in range(len(eog_proj)):
             exp_var.append(str(np.round(eog_proj[i]['explained_var'],2)))
             exp_var.append('%, ')
-        report.add_figure(fig, title='Eog Projections', caption = f"{', '.join(exp_var)} — num of proj selected = {num_proj_eog[1]}")
+        report.add_figure(fig, title='Eog Projections', caption = f"{', '.join(exp_var)} — num of proj selected = {num_proj_eog}")
         
         # ERM SSP can be broadband or computed from a specific band
         if erm_ssp_band: #To avoid TSSS reduncancy, this is only run if called! 
@@ -822,11 +846,11 @@ def preprocess_subject(
                 if not isinstance(erm_ssp_band, (list, tuple)) or len(erm_ssp_band) != 2:
                     raise ValueError("erm_ssp_band must be 'broad' or [low, high]")
                 low, high = erm_ssp_band
-                print(f"→ Computing ERM SSP using filtered band {low}-{high} Hz")
+                #print(f"→ Computing ERM SSP using filtered band {low}-{high} Hz")
                 erm_ssp_caption = f"Band-limited ERM SSP projectors extracted after filtering the ERM from {low} to {high} Hz."
                 erm_for_ssp = raw_erm.copy().filter(l_freq=low, h_freq=high)
             else:
-                print("→ Computing ERM SSP using broadband ERM (no filtering)")
+                #print("→ Computing ERM SSP using broadband ERM (no filtering)")
                 erm_ssp_caption = "Broadband ERM SSP projectors; no additional ERM filtering was applied before SSP extraction."
             er_proj = mne.compute_proj_raw(erm_for_ssp, n_grad=3, n_mag=3, verbose=False)
             
@@ -842,13 +866,13 @@ def preprocess_subject(
                 title="ERM Projections",
                 caption = (f"{erm_ssp_caption}\n"
                            f"Explained variance: {er_exp_var}\n"
-                           f"Num of projections selected: {num_proj_erm[0]}")
+                           f"Num of projections selected: {num_proj_erm}")
             )
 
         if raw_ssp_band: 
             generic_proj = []
             for i, (low, high) in enumerate(raw_ssp_band):
-                print(f"→ Computing generic (raw) SSP using filtered band {low}-{high} Hz")
+                #print(f"→ Computing generic (raw) SSP using filtered band {low}-{high} Hz")
                 filt_raw = raw.copy().filter(l_freq=low, h_freq=high)
                 # You can customize number of components per band
                 proj = mne.compute_proj_raw(filt_raw, n_grad=3, n_mag=3, verbose=False)
@@ -868,11 +892,11 @@ def preprocess_subject(
                 title="Generic Raw Projections",
                 caption = (f"{generic_ssp_caption}\n"
                            f"Explained variance: {generic_exp_var}\n"
-                           f"Num of projections selected: {num_proj_raw[0]}")
+                           f"Num of projections selected: {num_proj_raw}")
             )
         
         if bcglike_ssp: #Ballistocardiographic
-            print("→ Computing SSP for ballistocardiographic-like events: bandpass 1.5-8Hz, -200-500 ms")
+            #print("→ Computing SSP for ballistocardiographic-like events: bandpass 1.5-8Hz, -200-500 ms")
             filt_raw = raw.copy().filter(l_freq=1.5, h_freq=8)
             bcglike_ev = mne.preprocessing.create_ecg_epochs(filt_raw, ch_name=ecg_ch, tmin=-0.2, tmax=0.5).average()
             fig = bcglike_ev.plot_joint(show=False)
@@ -885,7 +909,7 @@ def preprocess_subject(
             for i in range(len(bcglike_proj)):
                 exp_var.append(str(np.round(bcglike_proj[i]['explained_var'],2)))
                 exp_var.append('%, ')
-            report.add_figure(fig, title='Ballistocardiographic-like Projections', caption = f"{', '.join(exp_var)} — num of proj selected = {num_proj_ecg[0]}")
+            report.add_figure(fig, title='Ballistocardiographic-like Projections', caption = f"{', '.join(exp_var)} — num of proj selected = {num_proj_bcglike}")
             
         
 
@@ -895,20 +919,53 @@ def preprocess_subject(
         #   - "planar" for gradiometers
         #   - "axial" for magnetometers
         # Therefore, num_proj_* is interpreted as (n_grad, n_mag).
-        def _select_megin_proj_by_type(projs, n_proj, label):
-            n_grad, n_mag = n_proj
+        def _select_proj_by_meg_type(projs, n_proj, label, info, system):
+            # num_proj_* can arrive as an int, [int] from argparse nargs=1,
+            # or occasionally as a tuple/list. In all cases, use one value.
 
-            grad_proj = [p for p in projs if "planar" in p.get("desc", "").lower()]
-            mag_proj = [p for p in projs if "axial" in p.get("desc", "").lower()]
+            n_proj = int(n_proj)
 
-            selected = grad_proj[:n_grad] + mag_proj[:n_mag]
+            grad_chs = set(info["ch_names"][idx] for idx in mne.pick_types(info, meg="grad"))
+            mag_chs = set(info["ch_names"][idx] for idx in mne.pick_types(info, meg="mag"))
 
-            if len(selected) < (n_grad + n_mag):
-                print(
-                    f"⚠️ {label}: requested {n_grad} grad + {n_mag} mag projectors, "
-                    f"but found {len(grad_proj)} grad and {len(mag_proj)} mag projectors. "
-                    f"Applying {len(selected)} projectors."
-                )
+            grad_proj = []
+            mag_proj = []
+            other_meg_proj = []
+
+            for p in projs:
+                desc = p.get("desc", "").lower()
+                col_names = set(p.get("data", {}).get("col_names", []))
+
+                if col_names & grad_chs or "planar" in desc or "grad" in desc:
+                    grad_proj.append(p)
+                elif col_names & mag_chs or "axial" in desc or "mag" in desc:
+                    mag_proj.append(p)
+                else:
+                    other_meg_proj.append(p)
+
+            if system == "MEGIN":
+                selected = grad_proj[:n_proj] + mag_proj[:n_proj]
+                expected = n_proj * 2
+
+                if len(selected) < expected:
+                    print(
+                        f"⚠️ {label}: requested {n_proj} grad + {n_proj} mag projectors, "
+                        f"but found {len(grad_proj)} grad and {len(mag_proj)} mag projectors. "
+                        f"Applying {len(selected)} projectors."
+                    )
+
+            else:
+                # CTF systems do not have the same planar/axial MEGIN split.
+                # Apply projectors from the available MEG type only.
+                available_proj = grad_proj + mag_proj + other_meg_proj
+                selected = available_proj[:n_proj]
+
+                if len(selected) < n_proj:
+                    print(
+                        f"⚠️ {label}: requested {n_proj} CTF MEG projectors, "
+                        f"but found only {len(available_proj)}. "
+                        f"Applying {len(selected)} projectors."
+                    )
 
             return selected
 
@@ -917,15 +974,19 @@ def preprocess_subject(
                 raw_obj.add_proj(projs)
                 raw_erm_obj.add_proj(projs)
 
-        selected_ecg_proj = _select_megin_proj_by_type(ecg_proj, num_proj_ecg, "ECG SSP")
+        selected_ecg_proj = _select_proj_by_meg_type(ecg_proj, num_proj_ecg, "ECG SSP", raw.info, system_upper)
         _add_selected_projs(raw, raw_erm, selected_ecg_proj)
 
-        selected_eog_proj = _select_megin_proj_by_type(eog_proj, num_proj_eog, "EOG SSP")
+        selected_eog_proj = _select_proj_by_meg_type(eog_proj, num_proj_eog, "EOG SSP", raw.info, system_upper)
         _add_selected_projs(raw, raw_erm, selected_eog_proj)
 
         if erm_ssp_band:
-            selected_erm_proj = _select_megin_proj_by_type(er_proj, num_proj_erm, "ERM SSP")
+            selected_erm_proj = _select_proj_by_meg_type(er_proj, num_proj_erm, "ERM SSP", raw_erm.info, system_upper)
             _add_selected_projs(raw, raw_erm, selected_erm_proj)
+
+        if bcglike_ssp:
+            selected_bcglike_proj = _select_proj_by_meg_type( bcglike_proj, num_proj_bcglike, "Ballistocardiographic-like SSP", raw.info, system_upper,)
+            _add_selected_projs(raw, raw_erm, selected_bcglike_proj)
 
         if raw_ssp_band:
             selected_generic_proj = []
@@ -936,23 +997,18 @@ def preprocess_subject(
                 stop = start + n_per_band
                 band_proj = generic_proj[start:stop]
 
-                selected_band_proj = _select_megin_proj_by_type(
+                selected_band_proj = _select_proj_by_meg_type(
                     band_proj,
                     num_proj_raw,
                     f"Generic raw SSP {low}-{high} Hz",
+                    raw.info,
+                    system_upper,
                 )
                 selected_generic_proj.extend(selected_band_proj)
 
             _add_selected_projs(raw, raw_erm, selected_generic_proj)
-
-        if bcglike_ssp:
-            selected_bcglike_proj = _select_megin_proj_by_type(
-                bcglike_proj,
-                num_proj_bcglike,
-                "Ballistocardiographic-like SSP",
-            )
-            _add_selected_projs(raw, raw_erm, selected_bcglike_proj)
-
+            
+        print("→ Applying SSP")
         raw.apply_proj()
         raw_erm.apply_proj()
     except Exception as e:
@@ -1401,11 +1457,11 @@ def _parse_args():
     p.add_argument("--erm_ssp_band", type=str, default=None, help="ERM band for SSP: 'broad' or low-high (e.g. 10-20)")
     p.add_argument("--raw_ssp_band", type=parse_ranges, default=None, required=False, help="Frequency ranges for generic SSP as start-end pairs, e.g. 42-45,50-53")
     p.add_argument("--bcglike_ssp", action="store_true", help="Apply ssp for ballistocardiographic-like events.")
-    p.add_argument("--num_proj_eog", type=int, nargs=2, default=[1, 1], help="Number of EOG SSP projectors to apply, respectively. Example: --num_proj_eog 1 1")
-    p.add_argument("--num_proj_ecg", type=int, nargs=2, default=[1, 1], help="Number of ECG SSP projectors to apply, respectively. Example: --num_proj_ecg 1 1")
-    p.add_argument("--num_proj_erm", type=int, nargs=2, default=[1, 1], help="Number of bandlimited ERM SSP projectors to apply, respectively. Example: --num_proj_erm 1 1")
-    p.add_argument("--num_proj_raw", type=int, nargs=2, default=[1, 1], help="Number of bandlimited Raw SSP projectors to apply, respectively. Example: --num_proj_raw 1 1")
-    p.add_argument("--num_proj_bcglike", type=int, nargs=2, default=[1, 1], help="Number of ballistocardiographic-like SSP projectors to apply, respectively. Example: --num_proj_bcglike 1 1")
+    p.add_argument("--num_proj_eog", type=int, default=1, help="Number of EOG SSP projectors to apply, respectively. Example: --num_proj_eog 1")
+    p.add_argument("--num_proj_ecg", type=int, default=1, help="Number of ECG SSP projectors to apply, respectively. Example: --num_proj_ecg 1")
+    p.add_argument("--num_proj_erm", type=int, default=1, help="Number of bandlimited ERM SSP projectors to apply, respectively. Example: --num_proj_erm 1")
+    p.add_argument("--num_proj_raw", type=int, default=1, help="Number of bandlimited Raw SSP projectors to apply, respectively. Example: --num_proj_raw 1")
+    p.add_argument("--num_proj_bcglike", type=int, default=1, help="Number of ballistocardiographic-like SSP projectors to apply, respectively. Example: --num_proj_bcglike 1 1")
     
     # additional_bads como lista
     p.add_argument("--additional_bads", type=str, nargs="*", default=[])
