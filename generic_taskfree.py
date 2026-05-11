@@ -345,6 +345,33 @@ def _already_has_sss(r: mne.io.BaseRaw) -> bool:
     return False
 
 
+
+
+# ----------------------------------------------------------
+# Helper to save preprocessing hyperparameters
+# ----------------------------------------------------------
+
+def save_hyperparameters(report_dir: str, args, subject_id: str, session: str | None = None):
+    """Save all CLI hyperparameters used for preprocessing."""
+
+    os.makedirs(report_dir, exist_ok=True)
+
+    if session:
+        out_name = f"{subject_id}_{session}_hyperparameters.txt"
+    else:
+        out_name = f"{subject_id}_hyperparameters.txt"
+
+    out_path = os.path.join(report_dir, out_name)
+
+    with open(out_path, "w") as f:
+        f.write("Generic MNE preprocessing hyperparameters\n")
+        f.write("=" * 60 + "\n\n")
+
+        for key, value in sorted(vars(args).items()):
+            f.write(f"{key}: {value}\n")
+
+    print(f"→ Hyperparameters saved at: {out_path}")
+
 # ----------------------------------------------------------
 # Main preprocessing function
 # ----------------------------------------------------------
@@ -1561,4 +1588,30 @@ if __name__ == "__main__":
         system=args.system,
         json=args.json,
         overwrite=args.overwrite,
+    )
+
+    # ---- Save preprocessing hyperparameters ----
+    if args.session is None:
+        report_dir = os.path.join(
+            args.root_dir,
+            "derivatives",
+            args.subject_id,
+            args.inv_method,
+            "report",
+        )
+    else:
+        report_dir = os.path.join(
+            args.root_dir,
+            "derivatives",
+            args.subject_id,
+            args.session,
+            args.inv_method,
+            "report",
+        )
+
+    save_hyperparameters(
+        report_dir=report_dir,
+        args=args,
+        subject_id=args.subject_id,
+        session=args.session,
     )
