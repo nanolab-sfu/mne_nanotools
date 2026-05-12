@@ -1538,7 +1538,9 @@ if __name__ == "__main__":
     print(f"ERM path: {erm_path}")
 
     # Parse erm_ssp_band argument
-    if args.erm_ssp_band == "broad":
+    if args.erm_ssp_band is None:
+        erm_ssp_band = None
+    elif args.erm_ssp_band == "broad":
         erm_ssp_band = "broad"
     else:
         low, high = args.erm_ssp_band.split("-")
