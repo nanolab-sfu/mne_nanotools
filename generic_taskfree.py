@@ -351,15 +351,20 @@ def _already_has_sss(r: mne.io.BaseRaw) -> bool:
 # Helper to save preprocessing hyperparameters
 # ----------------------------------------------------------
 
-def save_hyperparameters(report_dir: str, args, subject_id: str, session: str | None = None):
+def save_hyperparameters(report_dir: str, args, subject_id: str, session: str | None = None, run: str | None = None):
     """Save all CLI hyperparameters used for preprocessing."""
 
     os.makedirs(report_dir, exist_ok=True)
 
+    name_parts = [subject_id]
+
     if session:
-        out_name = f"{subject_id}_{session}_hyperparameters.txt"
-    else:
-        out_name = f"{subject_id}_hyperparameters.txt"
+        name_parts.append(session)
+
+    if run:
+        name_parts.append(str(run))
+
+    out_name = "_".join(name_parts) + "_hyperparameters.txt"
 
     out_path = os.path.join(report_dir, out_name)
 
@@ -1309,7 +1314,7 @@ def preprocess_subject(
                 print(f"→ Computing Source Estimation {inv_method}")
                 start, stop = raw.time_as_index([0,crop_tmax[1]-crop_tmin[1]])
 
-                #Whats all this hyperparameters?! Make it more clear to you and everyone
+                
                 filters = mne.beamformer.make_lcmv(
                     raw.info,
                     fwd,
@@ -1616,4 +1621,5 @@ if __name__ == "__main__":
         args=args,
         subject_id=args.subject_id,
         session=args.session,
+        run=args.run,
     )
