@@ -789,11 +789,29 @@ def preprocess_subject(
         raw_erm.info["bads"].extend(additional_bads)
 
     # ---- ECG/EOG QC ----
+    ecg_ev = None
+    eog_ev = None
+    ecg_event_count = None
+    eog_event_count = None
+    heart_rate_bpm = None
+    blink_rate_bpm = None
+
     try:
         print("→ EOG/ECG artifact detection")
-        ecg_ev = mne.preprocessing.create_ecg_epochs(raw, ch_name=ecg_ch).average()
+        ecg_epochs = mne.preprocessing.create_ecg_epochs(raw, ch_name=ecg_ch)
+        ecg_ev = ecg_epochs.average()
+        ecg_event_count = len(ecg_epochs.events)
+        duration_min = raw.times[-1] / 60.0 if raw.times[-1] > 0 else np.nan
+        heart_rate_bpm = ecg_event_count / duration_min if duration_min and not np.isnan(duration_min) else np.nan
         fig = ecg_ev.plot_joint(show=False)
-        report.add_figure(fig, title="ECG events")
+        report.add_figure(
+            fig,
+            title="ECG events",
+            caption=(
+                f"ECG events detected: {ecg_event_count}; "
+                f"estimated heart rate: {heart_rate_bpm:.2f} events/min."
+            ),
+        )
     except Exception as e:
         print(f"⚠️ ECG QC failed: {e}")
 
@@ -805,11 +823,23 @@ def preprocess_subject(
             f.write(str(e) + "\n\n")
             f.write("Traceback:\n")
             f.write(traceback.format_exc())
+
     try:
-        eog_ev = mne.preprocessing.create_eog_epochs(raw, ch_name=eog_ch).average()
+        eog_epochs = mne.preprocessing.create_eog_epochs(raw, ch_name=eog_ch)
+        eog_ev = eog_epochs.average()
+        eog_event_count = len(eog_epochs.events)
+        duration_min = raw.times[-1] / 60.0 if raw.times[-1] > 0 else np.nan
+        blink_rate_bpm = eog_event_count / duration_min if duration_min and not np.isnan(duration_min) else np.nan
         fig = eog_ev.plot_joint(show=False)
-        report.add_figure(fig, title="EOG events")
-    
+        report.add_figure(
+            fig,
+            title="EOG events",
+            caption=(
+                f"EOG/blink events detected: {eog_event_count}; "
+                f"estimated blink rate: {blink_rate_bpm:.2f} events/min."
+            ),
+        )
+
     except Exception as e:
         print(f"⚠️ EOG QC failed: {e}")
 
@@ -852,24 +882,40 @@ def preprocess_subject(
         #print("→ Computing ECG SSP — num of proj selected = {num_proj_ecg} ")   
 
         # Create SSP ecg/eog projectors
-        ecg_proj, ecg_array = mne.preprocessing.compute_proj_ecg(raw,n_grad=3,n_mag=3, reject=None) # For ECG proj, first pca is always enough
+        ecg_proj, ecg_array = mne.preprocessing.compute_proj_ecg(raw, n_grad=3, n_mag=3, reject=None) # For ECG proj, first pca is always enough
         fig = mne.viz.plot_projs_joint(ecg_proj, ecg_ev, show=False)
         fig.suptitle("ECG projectors")
         exp_var = []
         for i in range(len(ecg_proj)):
             exp_var.append(str(np.round(ecg_proj[i]['explained_var'],2)))
             exp_var.append('%, ')
-        report.add_figure(fig, title='Ecg Projections', caption = f"{', '.join(exp_var)} — num of proj selected = {num_proj_ecg}")
+        ecg_caption_parts = [
+            f"Explained variance:\n{', '.join(exp_var)}",
+            f"Num of projections selected:\n{num_proj_ecg}",
+        ]
+        if ecg_event_count is not None and heart_rate_bpm is not None:
+            ecg_caption_parts.append(
+                f"ECG events used for projector estimation:\n{ecg_event_count}\nEstimated heart rate:\n{heart_rate_bpm:.2f} events/min"
+            )
+        report.add_figure(fig, title='ECG Projections', caption="\n".join(ecg_caption_parts))
         
         #print("→ Computing EOG SSP — num of proj selected = {num_proj_eog} ")   
-        eog_proj, eog_array = mne.preprocessing.compute_proj_eog(raw,n_grad=3,n_mag=3, reject=None) # Default options look fine
+        eog_proj, eog_array = mne.preprocessing.compute_proj_eog(raw, n_grad=3, n_mag=3, reject=None) # Default options look fine
         fig = mne.viz.plot_projs_joint(eog_proj, eog_ev, show=False)
         fig.suptitle("EOG projectors")
         exp_var = []
         for i in range(len(eog_proj)):
             exp_var.append(str(np.round(eog_proj[i]['explained_var'],2)))
             exp_var.append('%, ')
-        report.add_figure(fig, title='Eog Projections', caption = f"{', '.join(exp_var)} — num of proj selected = {num_proj_eog}")
+        eog_caption_parts = [
+            f"Explained variance:\n{', '.join(exp_var)}",
+            f"Num of projections selected:\n{num_proj_eog}",
+        ]
+        if eog_event_count is not None and blink_rate_bpm is not None:
+            eog_caption_parts.append(
+                f"EOG/blink events used for projector estimation:\n{eog_event_count}\nEstimated blink rate:\n{blink_rate_bpm:.2f} events/min"
+            )
+        report.add_figure(fig, title='EOG Projections', caption="\n".join(eog_caption_parts))
         
         # ERM SSP can be broadband or computed from a specific band
         if erm_ssp_band: #To avoid TSSS reduncancy, this is only run if called! 
