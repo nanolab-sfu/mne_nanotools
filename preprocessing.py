@@ -150,14 +150,15 @@ def compute_noise_cov(er_fname, raw, calibration, cross_talk):
     return noise_cov
 
 
-def mark_bad_channels(raw):
+def mark_bad_channels(raw,calibration,cross_talk,):
     # Mark bad channels, necessary to avoid noise spreading in Maxwell filtering
     # Ideally, this would be done manually at the time of recording
     # auto_noisy_chs, auto_flat_chs, auto_scores = (
     #    mne.preprocessing.find_bad_channels_maxwell(raw, return_scores=True)
     # )
     auto_noisy_chs, auto_flat_chs, auto_scores = (
-        mne.preprocessing.find_bad_channels_maxwell(raw, return_scores=True)
+        mne.preprocessing.find_bad_channels_maxwell(raw, calibration=calibration,
+        cross_talk=cross_talk, return_scores=True)
     )
     bads = raw.info["bads"] + auto_noisy_chs + auto_flat_chs
     raw.info["bads"] = bads
@@ -181,7 +182,7 @@ def max_filter(raw, calibration, cross_talk, st_duration, head_pos, extended_pro
     # Detect bad channels, necessary to avoid noise spreading, ideally done manually
     if head_pos is not None:
         coord_frame = 'head'
-        raw = mark_bad_channels(raw)
+        raw = mark_bad_channels(raw,calibration=calibration,cross_talk=cross_talk,)
     else:
         coord_frame = 'meg'
         

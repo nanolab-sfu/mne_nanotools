@@ -53,6 +53,30 @@ def parse_ranges(arg):
         ranges.append((float(start), float(end)))
     return ranges
 
+# ---- Channel list parser ----
+def parse_channel_list(values):
+    """
+    Parse channel names passed either as space-separated values, comma-separated
+    values, or a mixture of both.
+
+    Examples
+    --------
+    --additional_bads MEG2443 MEG1032
+    --additional_bads MEG2443,MEG1032
+    --additional_bads MEG2443,MEG1032 MEG0111
+    """
+    if values is None:
+        return []
+
+    if isinstance(values, str):
+        values = [values]
+
+    channels = []
+    for item in values:
+        channels.extend(ch.strip() for ch in item.split(",") if ch.strip())
+
+    return channels
+
 def find_meg(root_dir: str,
                  subject_id: str,
                  session: str | None = None,
@@ -1156,9 +1180,16 @@ def preprocess_subject(
     report.add_covariance(noise_cov, info=raw_erm.info, title='Noise covariance')
 
     # ---- Save filtered raw ----
-    if ext == "fif":
-        filt_path = os.path.join(str(Path(path2raw).with_suffix("") ) + f"_filt_proj.fif")
-        raw.save(filt_path, overwrite=True)
+        # MNE Raw.save() writes FIF files. Even if the input is CTF .ds,
+    # processed outputs should be cached as FIF.
+    filt_path = str(Path(path2raw).with_suffix("")) + "_filt_proj.fif"
+    filt_erm_path = str(Path(path2raw_erm).with_suffix("")) + "_filt_proj.fif"
+    raw.save(filt_path, overwrite=True)
+    raw_erm.save(filt_erm_path, overwrite=True)
+
+    print(f"→ Filtered/projected raw saved at: {filt_path}")
+    print(f"→ Filtered/projected ERM saved at: {filt_erm_path}")
+
 
     # ======================================================
     #       SOURCE MODELING (BEM / SRC / FORWARD / INVERSE)
@@ -1541,8 +1572,12 @@ def _parse_args():
     p.add_argument("--num_proj_raw", type=int, default=1, help="Number of bandlimited Raw SSP projectors to apply, respectively. Example: --num_proj_raw 1")
     p.add_argument("--num_proj_bcglike", type=int, default=1, help="Number of ballistocardiographic-like SSP projectors to apply, respectively. Example: --num_proj_bcglike 1 1")
     
-    # additional_bads como lista
-    p.add_argument("--additional_bads", type=str, nargs="*", default=[])
+    # Additional bad channels can be passed as spaces, commas, or both.
+    # Examples:
+    #   --additional_bads MEG2443 MEG1032
+    #   --additional_bads MEG2443,MEG1032
+    #   --additional_bads MEG2443,MEG1032 MEG0111
+    p.add_argument("--additional_bads", type=str, nargs="*", default=[], help="Add any numbers of bad channels")
     p.add_argument("--verbose", action="store_true", help="Enable verbose MNE output")
     p.add_argument("--json", action = "store_true", help="Only true if .json file with fidutials exists AND was use to generete the coregistation automatically")
     p.add_argument("--overwrite", action = "store_true", help="If called, it will overwrite all the *_tsss.fif, *.stc and report files, allong any other output.")
@@ -1627,7 +1662,7 @@ if __name__ == "__main__":
         bem_watershed=args.bem_watershed,
         inv_method=args.inv_method,
         snr=args.snr,
-        additional_bads=tuple(args.additional_bads),
+        additional_bads=tuple(parse_channel_list(args.additional_bads)),
         n_jobs=args.n_jobs,
         erm_ssp_band=erm_ssp_band,
         raw_ssp_band=args.raw_ssp_band,
