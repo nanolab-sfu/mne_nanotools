@@ -811,6 +811,7 @@ def preprocess_subject(
     if additional_bads:
         raw.info["bads"].extend(additional_bads)
         raw_erm.info["bads"].extend(additional_bads)
+        print(f"→ Additional bad channels were added: {additional_bads} Hz")
 
     # ---- ECG/EOG QC ----
     ecg_ev = None
