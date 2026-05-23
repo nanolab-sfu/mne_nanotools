@@ -354,6 +354,7 @@ def find_erm(root_dir: str,
 # Helpers
 # ----------------------------------------------------------
 
+
 def _already_has_sss(r: mne.io.BaseRaw) -> bool:
     """Return True if Maxwell/SSS/tSSS has already been applied to this Raw."""
     try:
@@ -367,6 +368,22 @@ def _already_has_sss(r: mne.io.BaseRaw) -> bool:
         if isinstance(entry, dict) and ("max_info" in entry):
             return True
     return False
+
+
+# ----------------------------------------------------------
+# Helper: Add figure(s) with captions (handles list/tuple of figs)
+def _add_figure_with_caption(report, fig, title, caption=None):
+    """Add one or more Matplotlib figures to an MNE report with matching captions.
+
+    Some MNE plotting functions, such as Evoked.plot_joint(), can return a list
+    of figures. In that case, Report.add_figure() requires one caption per
+    figure, not a single caption string.
+    """
+    if isinstance(fig, (list, tuple)):
+        captions = None if caption is None else [caption] * len(fig)
+        report.add_figure(fig=fig, title=title, caption=captions)
+    else:
+        report.add_figure(fig=fig, title=title, caption=caption)
 
 
 
@@ -829,7 +846,8 @@ def preprocess_subject(
         duration_min = raw.times[-1] / 60.0 if raw.times[-1] > 0 else np.nan
         heart_rate_bpm = ecg_event_count / duration_min if duration_min and not np.isnan(duration_min) else np.nan
         fig = ecg_ev.plot_joint(show=False)
-        report.add_figure(
+        _add_figure_with_caption(
+            report,
             fig,
             title="ECG events",
             caption=(
@@ -856,7 +874,8 @@ def preprocess_subject(
         duration_min = raw.times[-1] / 60.0 if raw.times[-1] > 0 else np.nan
         blink_rate_bpm = eog_event_count / duration_min if duration_min and not np.isnan(duration_min) else np.nan
         fig = eog_ev.plot_joint(show=False)
-        report.add_figure(
+        _add_figure_with_caption(
+            report,
             fig,
             title="EOG events",
             caption=(
@@ -922,7 +941,7 @@ def preprocess_subject(
             ecg_caption_parts.append(
                 f"ECG events used for projector estimation:\n{ecg_event_count}\nEstimated heart rate:\n{heart_rate_bpm:.2f} events/min"
             )
-        report.add_figure(fig, title='ECG Projections', caption="\n".join(ecg_caption_parts))
+        _add_figure_with_caption(report, fig, title='ECG Projections', caption="\n".join(ecg_caption_parts))
         
         #print("→ Computing EOG SSP — num of proj selected = {num_proj_eog} ")   
         eog_proj, eog_array = mne.preprocessing.compute_proj_eog(raw, n_grad=3, n_mag=3, reject=None) # Default options look fine
@@ -940,7 +959,7 @@ def preprocess_subject(
             eog_caption_parts.append(
                 f"EOG/blink events used for projector estimation:\n{eog_event_count}\nEstimated blink rate:\n{blink_rate_bpm:.2f} events/min"
             )
-        report.add_figure(fig, title='EOG Projections', caption="\n".join(eog_caption_parts))
+        _add_figure_with_caption(report, fig, title='EOG Projections', caption="\n".join(eog_caption_parts))
         
         # ERM SSP can be broadband or computed from a specific band
         if erm_ssp_band: #To avoid TSSS reduncancy, this is only run if called! 
@@ -1012,7 +1031,7 @@ def preprocess_subject(
             for i in range(len(bcglike_proj)):
                 exp_var.append(str(np.round(bcglike_proj[i]['explained_var'],2)))
                 exp_var.append('%, ')
-            report.add_figure(fig, title='Ballistocardiographic-like Projections', caption = f"{', '.join(exp_var)} — num of proj selected = {num_proj_bcglike}")
+            _add_figure_with_caption(report, fig, title='Ballistocardiographic-like Projections', caption=f"{', '.join(exp_var)} — num of proj selected = {num_proj_bcglike}")
             
         
 
