@@ -316,7 +316,7 @@ def plot_corr_singlefig(corr):
     plt.show()
 
 
-def plot_corr_test(corr, labels, out_dir):
+def plot_corr_with_labels(corr, labels, out_dir):
     """
     Plot connectivity matrices with optional reordering and boundary marking.
 
