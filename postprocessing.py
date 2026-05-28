@@ -11,10 +11,14 @@ Last modified 27/11/2025
 """
 
 import mne
+import os
 from scipy.signal import welch
 from joblib import Parallel, delayed
 import numpy as np
 import mne_connectivity
+import re
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 def _compute_psd_single(vertex_ts, sfreq, window_samples, overlap_samples):
     """
@@ -353,7 +357,7 @@ def plot_corr_with_labels(corr, labels, out_dir):
 
         fig, ax = plt.subplots(figsize=(12, 10), constrained_layout=True)
         clim = np.percentile(band, [5, 95])
-        sns.heatmap(band, cmap="mako", vmin=clim[0], vmax=clim[1], ax=ax, cbar=True)
+        sns.heatmap(band, cmap="viridis", vmin=clim[0], vmax=clim[1], ax=ax, cbar=True)
         ax.set_title(f"Pairwise correlation: {band_name}")
 
         ax.hlines(
