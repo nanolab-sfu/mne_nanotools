@@ -900,6 +900,12 @@ def preprocess_subject(
     # ---- SSP ----
     try:
         
+        if raw_ssp_band:
+            raw_ssp_desc = ", ".join([f"{low}-{high} Hz" for low, high in raw_ssp_band])
+            print(f"   - Generic raw SSP: enabled | bands={raw_ssp_desc} | n_proj={num_proj_raw} per band/per available MEG type | n_grad=3, n_mag=3")
+        else:
+            print("   - Generic raw SSP: disabled")
+
         print("→ SSP configuration:")
         print(f"   - ECG SSP: enabled | n_proj={num_proj_ecg} per available MEG type | n_grad=3, n_mag=3 | reject=None")
         print(f"   - EOG SSP: enabled | n_proj={num_proj_eog} per available MEG type | n_grad=3, n_mag=3 | reject=None")
@@ -913,17 +919,37 @@ def preprocess_subject(
         else:
             print("   - ERM SSP: disabled")
 
-        if raw_ssp_band:
-            raw_ssp_desc = ", ".join([f"{low}-{high} Hz" for low, high in raw_ssp_band])
-            print(f"   - Generic raw SSP: enabled | bands={raw_ssp_desc} | n_proj={num_proj_raw} per band/per available MEG type | n_grad=3, n_mag=3")
-        else:
-            print("   - Generic raw SSP: disabled")
-
         if bcglike_ssp:
             print(f"   - Ballistocardiographic-like SSP: enabled | ECG-locked | filter=1.5-8 Hz | epoch=-0.2 to 0.5 s | n_proj={num_proj_bcglike} per available MEG type | n_grad=3, n_mag=3 | reject=None")
         else:
             print("   - Ballistocardiographic-like SSP: disabled")
         #print("→ Computing ECG SSP — num of proj selected = {num_proj_ecg} ")   
+
+        if raw_ssp_band: 
+            generic_proj = []
+            for i, (low, high) in enumerate(raw_ssp_band):
+                #print(f"→ Computing generic (raw) SSP using filtered band {low}-{high} Hz")
+                filt_raw = raw.copy().filter(l_freq=low, h_freq=high)
+                # You can customize number of components per band
+                proj = mne.compute_proj_raw(filt_raw, n_grad=3, n_mag=3, verbose=False)
+                generic_proj.extend(proj)
+            
+            generic_exp_var = []
+            for proj in generic_proj:
+                if "explained_var" in proj:
+                    generic_exp_var.append(f"{np.round(proj['explained_var'], 2)}%")
+
+            generic_ssp_caption = f"Band-limited SSP projectors extracted after filtering the subjects MEG from {raw_ssp_band} Hz."
+
+            fig = mne.viz.plot_projs_topomap(generic_proj, info=raw.info, show=False)
+            fig.suptitle("ERM SSP projectors")
+            report.add_figure(
+                fig,
+                title="Generic Raw Projections",
+                caption = (f"{generic_ssp_caption}\n"
+                           f"Explained variance: {generic_exp_var}\n"
+                           f"Num of projections selected: {num_proj_raw}")
+            )
 
         # Create SSP ecg/eog projectors
         ecg_proj, ecg_array = mne.preprocessing.compute_proj_ecg(raw, n_grad=3, n_mag=3, reject=None) # For ECG proj, first pca is always enough
@@ -991,31 +1017,7 @@ def preprocess_subject(
                            f"Num of projections selected: {num_proj_erm}")
             )
 
-        if raw_ssp_band: 
-            generic_proj = []
-            for i, (low, high) in enumerate(raw_ssp_band):
-                #print(f"→ Computing generic (raw) SSP using filtered band {low}-{high} Hz")
-                filt_raw = raw.copy().filter(l_freq=low, h_freq=high)
-                # You can customize number of components per band
-                proj = mne.compute_proj_raw(filt_raw, n_grad=3, n_mag=3, verbose=False)
-                generic_proj.extend(proj)
-            
-            generic_exp_var = []
-            for proj in generic_proj:
-                if "explained_var" in proj:
-                    generic_exp_var.append(f"{np.round(proj['explained_var'], 2)}%")
-
-            generic_ssp_caption = f"Band-limited SSP projectors extracted after filtering the subjects MEG from {raw_ssp_band} Hz."
-
-            fig = mne.viz.plot_projs_topomap(generic_proj, info=raw.info, show=False)
-            fig.suptitle("ERM SSP projectors")
-            report.add_figure(
-                fig,
-                title="Generic Raw Projections",
-                caption = (f"{generic_ssp_caption}\n"
-                           f"Explained variance: {generic_exp_var}\n"
-                           f"Num of projections selected: {num_proj_raw}")
-            )
+        
         
         if bcglike_ssp: #Ballistocardiographic
             #print("→ Computing SSP for ballistocardiographic-like events: bandpass 1.5-8Hz, -200-500 ms")
@@ -1096,20 +1098,6 @@ def preprocess_subject(
                 raw_obj.add_proj(projs)
                 raw_erm_obj.add_proj(projs)
 
-        selected_ecg_proj = _select_proj_by_meg_type(ecg_proj, num_proj_ecg, "ECG SSP", raw.info, system_upper)
-        _add_selected_projs(raw, raw_erm, selected_ecg_proj)
-
-        selected_eog_proj = _select_proj_by_meg_type(eog_proj, num_proj_eog, "EOG SSP", raw.info, system_upper)
-        _add_selected_projs(raw, raw_erm, selected_eog_proj)
-
-        if erm_ssp_band:
-            selected_erm_proj = _select_proj_by_meg_type(er_proj, num_proj_erm, "ERM SSP", raw_erm.info, system_upper)
-            _add_selected_projs(raw, raw_erm, selected_erm_proj)
-
-        if bcglike_ssp:
-            selected_bcglike_proj = _select_proj_by_meg_type( bcglike_proj, num_proj_bcglike, "Ballistocardiographic-like SSP", raw.info, system_upper,)
-            _add_selected_projs(raw, raw_erm, selected_bcglike_proj)
-
         if raw_ssp_band:
             selected_generic_proj = []
             n_per_band = 6  # n_grad=3 + n_mag=3 in mne.compute_proj_raw above
@@ -1129,8 +1117,27 @@ def preprocess_subject(
                 selected_generic_proj.extend(selected_band_proj)
 
             _add_selected_projs(raw, raw_erm, selected_generic_proj)
+            print("→ Applying Generic raw SSP")
+            raw.apply_proj()
+            raw_erm.apply_proj()
+
+        selected_ecg_proj = _select_proj_by_meg_type(ecg_proj, num_proj_ecg, "ECG SSP", raw.info, system_upper)
+        _add_selected_projs(raw, raw_erm, selected_ecg_proj)
+
+        selected_eog_proj = _select_proj_by_meg_type(eog_proj, num_proj_eog, "EOG SSP", raw.info, system_upper)
+        _add_selected_projs(raw, raw_erm, selected_eog_proj)
+
+        if erm_ssp_band:
+            selected_erm_proj = _select_proj_by_meg_type(er_proj, num_proj_erm, "ERM SSP", raw_erm.info, system_upper)
+            _add_selected_projs(raw, raw_erm, selected_erm_proj)
+
+        if bcglike_ssp:
+            selected_bcglike_proj = _select_proj_by_meg_type( bcglike_proj, num_proj_bcglike, "Ballistocardiographic-like SSP", raw.info, system_upper,)
+            _add_selected_projs(raw, raw_erm, selected_bcglike_proj)
+
+        
             
-        print("→ Applying SSP")
+        print("→ Applying SSP ECG,EOG and ERM SSP's")
         raw.apply_proj()
         raw_erm.apply_proj()
     except Exception as e:
