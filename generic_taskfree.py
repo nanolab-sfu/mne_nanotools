@@ -418,6 +418,67 @@ def save_hyperparameters(report_dir: str, args, subject_id: str, session: str | 
 
     print(f"→ Hyperparameters saved at: {out_path}")
 
+# EOG/ECG projections are added after ERM SSP projectors.
+# MNE returns SSP projectors as one list containing different MEG sensor types.
+# For MEGIN, descriptions usually contain:
+#   - "planar" for gradiometers
+#   - "axial" for magnetometers
+# Therefore, num_proj_* is interpreted as (n_grad, n_mag).
+def _select_proj_by_meg_type(projs, n_proj, label, info, system):
+    # num_proj_* can arrive as an int, [int] from argparse nargs=1,
+    # or occasionally as a tuple/list. In all cases, use one value.
+
+    n_proj = int(n_proj)
+
+    grad_chs = set(info["ch_names"][idx] for idx in mne.pick_types(info, meg="grad"))
+    mag_chs = set(info["ch_names"][idx] for idx in mne.pick_types(info, meg="mag"))
+
+    grad_proj = []
+    mag_proj = []
+    other_meg_proj = []
+
+    for p in projs:
+        desc = p.get("desc", "").lower()
+        col_names = set(p.get("data", {}).get("col_names", []))
+
+        if col_names & grad_chs or "planar" in desc or "grad" in desc:
+            grad_proj.append(p)
+        elif col_names & mag_chs or "axial" in desc or "mag" in desc:
+            mag_proj.append(p)
+        else:
+            other_meg_proj.append(p)
+
+    if system == "MEGIN":
+        selected = grad_proj[:n_proj] + mag_proj[:n_proj]
+        expected = n_proj * 2
+
+        if len(selected) < expected:
+            print(
+                f"⚠️ {label}: requested {n_proj} grad + {n_proj} mag projectors, "
+                f"but found {len(grad_proj)} grad and {len(mag_proj)} mag projectors. "
+                f"Applying {len(selected)} projectors."
+            )
+
+    else:
+        # CTF systems do not have the same planar/axial MEGIN split.
+        # Apply projectors from the available MEG type only.
+        available_proj = grad_proj + mag_proj + other_meg_proj
+        selected = available_proj[:n_proj]
+
+        if len(selected) < n_proj:
+            print(
+                f"⚠️ {label}: requested {n_proj} CTF MEG projectors, "
+                f"but found only {len(available_proj)}. "
+                f"Applying {len(selected)} projectors."
+            )
+
+    return selected
+
+def _add_selected_projs(raw_obj, raw_erm_obj, projs):
+    if projs:
+        raw_obj.add_proj(projs)
+        raw_erm_obj.add_proj(projs)
+
 # ----------------------------------------------------------
 # Main preprocessing function
 # ----------------------------------------------------------
@@ -830,6 +891,94 @@ def preprocess_subject(
         raw_erm.info["bads"].extend(additional_bads)
         print(f"→ Additional bad channels were added: {additional_bads} Hz")
 
+    # ---- SSP ----
+
+    try:
+
+        print("→ SSP configuration:")
+        if raw_ssp_band:
+            raw_ssp_desc = ", ".join([f"{low}-{high} Hz" for low, high in raw_ssp_band])
+            print(f"   - Generic raw SSP: enabled | bands={raw_ssp_desc} | n_proj={num_proj_raw} per band/per available MEG type | n_grad=3, n_mag=3")
+        else:
+            print("   - Generic raw SSP: disabled")
+
+        print(f"   - ECG SSP: enabled | n_proj={num_proj_ecg} per available MEG type | n_grad=3, n_mag=3 | reject=None")
+        print(f"   - EOG SSP: enabled | n_proj={num_proj_eog} per available MEG type | n_grad=3, n_mag=3 | reject=None")
+
+        if erm_ssp_band:
+            if erm_ssp_band == "broad":
+                erm_ssp_desc = "broadband ERM"
+            else:
+                erm_ssp_desc = f"ERM filtered {erm_ssp_band[0]}-{erm_ssp_band[1]} Hz"
+            print(f"   - ERM SSP: enabled | {erm_ssp_desc} | n_proj={num_proj_erm} per available MEG type | n_grad=3, n_mag=3")
+        else:
+            print("   - ERM SSP: disabled")
+
+        if bcglike_ssp:
+            print(f"   - Ballistocardiographic-like SSP: enabled | ECG-locked | filter=1.5-8 Hz | epoch=-0.2 to 0.5 s | n_proj={num_proj_bcglike} per available MEG type | n_grad=3, n_mag=3 | reject=None")
+        else:
+            print("   - Ballistocardiographic-like SSP: disabled")
+        #print("→ Computing ECG SSP — num of proj selected = {num_proj_ecg} ")   
+
+        if raw_ssp_band: 
+            generic_proj = []
+            for i, (low, high) in enumerate(raw_ssp_band):
+                #print(f"→ Computing generic (raw) SSP using filtered band {low}-{high} Hz")
+                filt_raw = raw.copy().filter(l_freq=low, h_freq=high)
+                # You can customize number of components per band
+                proj = mne.compute_proj_raw(filt_raw, n_grad=3, n_mag=3, verbose=False)
+                generic_proj.extend(proj)
+            
+            generic_exp_var = []
+            for proj in generic_proj:
+                if "explained_var" in proj:
+                    generic_exp_var.append(f"{np.round(proj['explained_var'], 2)}%")
+
+            generic_ssp_caption = f"Band-limited SSP projectors extracted after filtering the subjects MEG from {raw_ssp_band} Hz."
+
+            fig = mne.viz.plot_projs_topomap(generic_proj, info=raw.info, show=False)
+            fig.suptitle("ERM SSP projectors")
+            report.add_figure(
+                fig,
+                title="Generic Raw Projections",
+                caption = (f"{generic_ssp_caption}\n"
+                           f"Explained variance: {generic_exp_var}\n"
+                           f"Num of projections selected: {num_proj_raw}")
+            )
+            selected_generic_proj = []
+            n_per_band = 6  # n_grad=3 + n_mag=3 in mne.compute_proj_raw above
+
+            for j, (low, high) in enumerate(raw_ssp_band):
+                start = j * n_per_band
+                stop = start + n_per_band
+                band_proj = generic_proj[start:stop]
+
+                selected_band_proj = _select_proj_by_meg_type(
+                    band_proj,
+                    num_proj_raw,
+                    f"Generic raw SSP {low}-{high} Hz",
+                    raw.info,
+                    system_upper,
+                )
+                selected_generic_proj.extend(selected_band_proj)
+
+            _add_selected_projs(raw, raw_erm, selected_generic_proj)
+            print("→ Applying Generic raw SSP")
+            raw.apply_proj()
+            raw_erm.apply_proj()
+
+    except Exception as e:
+        print(f"⚠️ SSP computation failed: {e}")
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        with open(log_file, "w") as f:
+            f.write("⚠️ SSP computation failed: \n")
+            f.write(f"Timestamp: {timestamp}\n\n")
+            f.write("Error message:\n")
+            f.write(str(e) + "\n\n")
+            f.write("Traceback:\n")
+            f.write(traceback.format_exc())
+
     # ---- ECG/EOG QC ----
     ecg_ev = None
     eog_ev = None
@@ -899,58 +1048,6 @@ def preprocess_subject(
     
     # ---- SSP ----
     try:
-        
-        if raw_ssp_band:
-            raw_ssp_desc = ", ".join([f"{low}-{high} Hz" for low, high in raw_ssp_band])
-            print(f"   - Generic raw SSP: enabled | bands={raw_ssp_desc} | n_proj={num_proj_raw} per band/per available MEG type | n_grad=3, n_mag=3")
-        else:
-            print("   - Generic raw SSP: disabled")
-
-        print("→ SSP configuration:")
-        print(f"   - ECG SSP: enabled | n_proj={num_proj_ecg} per available MEG type | n_grad=3, n_mag=3 | reject=None")
-        print(f"   - EOG SSP: enabled | n_proj={num_proj_eog} per available MEG type | n_grad=3, n_mag=3 | reject=None")
-
-        if erm_ssp_band:
-            if erm_ssp_band == "broad":
-                erm_ssp_desc = "broadband ERM"
-            else:
-                erm_ssp_desc = f"ERM filtered {erm_ssp_band[0]}-{erm_ssp_band[1]} Hz"
-            print(f"   - ERM SSP: enabled | {erm_ssp_desc} | n_proj={num_proj_erm} per available MEG type | n_grad=3, n_mag=3")
-        else:
-            print("   - ERM SSP: disabled")
-
-        if bcglike_ssp:
-            print(f"   - Ballistocardiographic-like SSP: enabled | ECG-locked | filter=1.5-8 Hz | epoch=-0.2 to 0.5 s | n_proj={num_proj_bcglike} per available MEG type | n_grad=3, n_mag=3 | reject=None")
-        else:
-            print("   - Ballistocardiographic-like SSP: disabled")
-        #print("→ Computing ECG SSP — num of proj selected = {num_proj_ecg} ")   
-
-        if raw_ssp_band: 
-            generic_proj = []
-            for i, (low, high) in enumerate(raw_ssp_band):
-                #print(f"→ Computing generic (raw) SSP using filtered band {low}-{high} Hz")
-                filt_raw = raw.copy().filter(l_freq=low, h_freq=high)
-                # You can customize number of components per band
-                proj = mne.compute_proj_raw(filt_raw, n_grad=3, n_mag=3, verbose=False)
-                generic_proj.extend(proj)
-            
-            generic_exp_var = []
-            for proj in generic_proj:
-                if "explained_var" in proj:
-                    generic_exp_var.append(f"{np.round(proj['explained_var'], 2)}%")
-
-            generic_ssp_caption = f"Band-limited SSP projectors extracted after filtering the subjects MEG from {raw_ssp_band} Hz."
-
-            fig = mne.viz.plot_projs_topomap(generic_proj, info=raw.info, show=False)
-            fig.suptitle("ERM SSP projectors")
-            report.add_figure(
-                fig,
-                title="Generic Raw Projections",
-                caption = (f"{generic_ssp_caption}\n"
-                           f"Explained variance: {generic_exp_var}\n"
-                           f"Num of projections selected: {num_proj_raw}")
-            )
-
         # Create SSP ecg/eog projectors
         ecg_proj, ecg_array = mne.preprocessing.compute_proj_ecg(raw, n_grad=3, n_mag=3, reject=None) # For ECG proj, first pca is always enough
         fig = mne.viz.plot_projs_joint(ecg_proj, ecg_ev, show=False)
@@ -1034,92 +1131,6 @@ def preprocess_subject(
                 exp_var.append(str(np.round(bcglike_proj[i]['explained_var'],2)))
                 exp_var.append('%, ')
             _add_figure_with_caption(report, fig, title='Ballistocardiographic-like Projections', caption=f"{', '.join(exp_var)} — num of proj selected = {num_proj_bcglike}")
-            
-        
-
-        # EOG/ECG projections are added after ERM SSP projectors.
-        # MNE returns SSP projectors as one list containing different MEG sensor types.
-        # For MEGIN, descriptions usually contain:
-        #   - "planar" for gradiometers
-        #   - "axial" for magnetometers
-        # Therefore, num_proj_* is interpreted as (n_grad, n_mag).
-        def _select_proj_by_meg_type(projs, n_proj, label, info, system):
-            # num_proj_* can arrive as an int, [int] from argparse nargs=1,
-            # or occasionally as a tuple/list. In all cases, use one value.
-
-            n_proj = int(n_proj)
-
-            grad_chs = set(info["ch_names"][idx] for idx in mne.pick_types(info, meg="grad"))
-            mag_chs = set(info["ch_names"][idx] for idx in mne.pick_types(info, meg="mag"))
-
-            grad_proj = []
-            mag_proj = []
-            other_meg_proj = []
-
-            for p in projs:
-                desc = p.get("desc", "").lower()
-                col_names = set(p.get("data", {}).get("col_names", []))
-
-                if col_names & grad_chs or "planar" in desc or "grad" in desc:
-                    grad_proj.append(p)
-                elif col_names & mag_chs or "axial" in desc or "mag" in desc:
-                    mag_proj.append(p)
-                else:
-                    other_meg_proj.append(p)
-
-            if system == "MEGIN":
-                selected = grad_proj[:n_proj] + mag_proj[:n_proj]
-                expected = n_proj * 2
-
-                if len(selected) < expected:
-                    print(
-                        f"⚠️ {label}: requested {n_proj} grad + {n_proj} mag projectors, "
-                        f"but found {len(grad_proj)} grad and {len(mag_proj)} mag projectors. "
-                        f"Applying {len(selected)} projectors."
-                    )
-
-            else:
-                # CTF systems do not have the same planar/axial MEGIN split.
-                # Apply projectors from the available MEG type only.
-                available_proj = grad_proj + mag_proj + other_meg_proj
-                selected = available_proj[:n_proj]
-
-                if len(selected) < n_proj:
-                    print(
-                        f"⚠️ {label}: requested {n_proj} CTF MEG projectors, "
-                        f"but found only {len(available_proj)}. "
-                        f"Applying {len(selected)} projectors."
-                    )
-
-            return selected
-
-        def _add_selected_projs(raw_obj, raw_erm_obj, projs):
-            if projs:
-                raw_obj.add_proj(projs)
-                raw_erm_obj.add_proj(projs)
-
-        if raw_ssp_band:
-            selected_generic_proj = []
-            n_per_band = 6  # n_grad=3 + n_mag=3 in mne.compute_proj_raw above
-
-            for j, (low, high) in enumerate(raw_ssp_band):
-                start = j * n_per_band
-                stop = start + n_per_band
-                band_proj = generic_proj[start:stop]
-
-                selected_band_proj = _select_proj_by_meg_type(
-                    band_proj,
-                    num_proj_raw,
-                    f"Generic raw SSP {low}-{high} Hz",
-                    raw.info,
-                    system_upper,
-                )
-                selected_generic_proj.extend(selected_band_proj)
-
-            _add_selected_projs(raw, raw_erm, selected_generic_proj)
-            print("→ Applying Generic raw SSP")
-            raw.apply_proj()
-            raw_erm.apply_proj()
 
         selected_ecg_proj = _select_proj_by_meg_type(ecg_proj, num_proj_ecg, "ECG SSP", raw.info, system_upper)
         _add_selected_projs(raw, raw_erm, selected_ecg_proj)
@@ -1140,6 +1151,7 @@ def preprocess_subject(
         print("→ Applying SSP ECG,EOG and ERM SSP's")
         raw.apply_proj()
         raw_erm.apply_proj()
+        
     except Exception as e:
         print(f"⚠️ SSP computation failed: {e}")
 
