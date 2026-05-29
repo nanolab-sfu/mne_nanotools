@@ -963,7 +963,7 @@ def preprocess_subject(
                 selected_generic_proj.extend(selected_band_proj)
 
             _add_selected_projs(raw, raw_erm, selected_generic_proj)
-            print("→ Applying Generic raw SSP")
+            print("→ Applying Generic raw SSP before ECG/EOG event detection")
             raw.apply_proj()
             raw_erm.apply_proj()
 
@@ -1048,8 +1048,24 @@ def preprocess_subject(
     
     # ---- SSP ----
     try:
-        # Create SSP ecg/eog projectors
-        ecg_proj, ecg_array = mne.preprocessing.compute_proj_ecg(raw, n_grad=3, n_mag=3, reject=None) # For ECG proj, first pca is always enough
+        # Generic SSP projectors were already added and applied above.
+        # We intentionally estimate ECG/EOG SSP on the cleaned data because
+        # generic SSP may improve ECG/EOG event detection by removing large
+        # low-frequency artifacts that can obscure cardiac/blink activity.
+        #
+        # Important MNE behavior:
+        # compute_proj_ecg() and compute_proj_eog() return ALL projectors,
+        # including those already stored in raw.info['projs'], followed by the
+        # newly estimated ECG/EOG projectors.
+        #
+        # If we do not remove the pre-existing projectors, the selection code
+        # below may accidentally re-select the generic SSP projectors instead
+        # of the newly computed ECG/EOG SSP projectors.
+        n_existing_proj = len(raw.info.get("projs", []))
+
+        ecg_proj_all, ecg_array = mne.preprocessing.compute_proj_ecg(raw, n_grad=3, n_mag=3, reject=None) # For ECG proj, first pca is always enough
+        ecg_proj = ecg_proj_all[n_existing_proj:]
+        # Keep only the newly estimated ECG projectors.
         fig = mne.viz.plot_projs_joint(ecg_proj, ecg_ev, show=False)
         fig.suptitle("ECG projectors")
         exp_var = []
@@ -1067,7 +1083,9 @@ def preprocess_subject(
         _add_figure_with_caption(report, fig, title='ECG Projections', caption="\n".join(ecg_caption_parts))
         
         #print("→ Computing EOG SSP — num of proj selected = {num_proj_eog} ")   
-        eog_proj, eog_array = mne.preprocessing.compute_proj_eog(raw, n_grad=3, n_mag=3, reject=None) # Default options look fine
+        eog_proj_all, eog_array = mne.preprocessing.compute_proj_eog(raw, n_grad=3, n_mag=3, reject=None) # Default options look fine
+        eog_proj = eog_proj_all[n_existing_proj:]
+        # Keep only the newly estimated EOG projectors.
         fig = mne.viz.plot_projs_joint(eog_proj, eog_ev, show=False)
         fig.suptitle("EOG projectors")
         exp_var = []
@@ -1122,7 +1140,9 @@ def preprocess_subject(
             bcglike_ev = mne.preprocessing.create_ecg_epochs(filt_raw, ch_name=ecg_ch, tmin=-0.2, tmax=0.5).average()
             fig = bcglike_ev.plot_joint(show=False)
             report.add_figure(fig, title="Ballistocardiographic-like events")
-            bcglike_proj, bcglike_array = mne.preprocessing.compute_proj_ecg(raw,n_grad=3,n_mag=3, l_freq=1.5, h_freq=8, reject=None) # For ECG proj, first pca is always enough
+            bcglike_proj_all, bcglike_array = mne.preprocessing.compute_proj_ecg(raw, n_grad=3, n_mag=3, l_freq=1.5, h_freq=8, reject=None) # For ECG proj, first pca is always enough
+            bcglike_proj = bcglike_proj_all[n_existing_proj:]
+            # Keep only the newly estimated BCG-like projectors.
             fig = mne.viz.plot_projs_joint(bcglike_proj, bcglike_ev, show=False)
             fig.suptitle("Ballistocardiographic-like SSP")
             exp_var = []
