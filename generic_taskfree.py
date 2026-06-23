@@ -392,21 +392,22 @@ def _add_figure_with_caption(report, fig, title, caption=None):
 # Helper to save preprocessing hyperparameters
 # ----------------------------------------------------------
 
-def save_hyperparameters(report_dir: str, args, subject_id: str, session: str | None = None, run: str | None = None):
+def save_hyperparameters(
+    report_dir: str,
+    args,
+    raw_stem: str,
+):
     """Save all CLI hyperparameters used for preprocessing."""
 
     os.makedirs(report_dir, exist_ok=True)
 
-    name_parts = [subject_id]
+    name_parts = [raw_stem]
 
-    if session:
-        name_parts.append(session)
-
-    if run:
-        name_parts.append(str(run))
+    # Add preferred file type if specified, e.g. digFiltered
+    if getattr(args, "prefer", None):
+        name_parts.append(str(args.prefer))
 
     out_name = "_".join(name_parts) + "_hyperparameters.txt"
-
     out_path = os.path.join(report_dir, out_name)
 
     with open(out_path, "w") as f:
@@ -678,7 +679,7 @@ def preprocess_subject(
 
     try: 
         print("→ Adding head movement report:")
-        preprocessing.compute_head_movement_report(raw, report, subject_id, deriv_dir, system_upper)
+        preprocessing.compute_head_movement_report(raw, report, Path(os.path.basename(path2raw)).stem, deriv_dir, system_upper)
     
     except Exception as e:
         print(f"⚠️ Head movement report failed: {e}")
@@ -1756,10 +1757,5 @@ if __name__ == "__main__":
             "report",
         )
 
-    save_hyperparameters(
-        report_dir=report_dir,
-        args=args,
-        subject_id=args.subject_id,
-        session=args.session,
-        run=args.run,
-    )
+    raw_stem = Path(file_path).stem
+    save_hyperparameters(report_dir=report_dir, args=args, raw_stem=raw_stem)

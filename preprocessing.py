@@ -42,14 +42,14 @@ def read_data(fname):
     mne.channels.fix_mag_coil_types(raw.info)
     return raw
 
-def compute_head_movement_report(raw, report, subject_id, deriv_dir, system):
+def compute_head_movement_report(raw, report, raw_stem, deriv_dir, system):
 
     # ---- Output directory ----
     out_dir = os.path.join(deriv_dir, "head_movement")
     os.makedirs(out_dir, exist_ok=True)
 
-    out_csv = os.path.join(out_dir, f"{subject_id}_head_movement_timeseries.csv")
-    out_metrics_csv = os.path.join(out_dir, f"{subject_id}_head_movement_metrics.csv")
+    out_csv = os.path.join(out_dir, f"{raw_stem}_head_movement_timeseries.csv")
+    out_metrics_csv = os.path.join(out_dir, f"{raw_stem}_head_movement_metrics.csv")
 
     # ---- Compute head position (system-dependent) ----
 
@@ -90,7 +90,7 @@ def compute_head_movement_report(raw, report, subject_id, deriv_dir, system):
 
     # ---- Metrics ----
     metrics = {
-        "subject_id": subject_id,
+        "subject_id": raw_stem,
         "rms_x_mm": np.sqrt(np.mean(disp_xyz_mm[:, 0] ** 2)),
         "rms_y_mm": np.sqrt(np.mean(disp_xyz_mm[:, 1] ** 2)),
         "rms_z_mm": np.sqrt(np.mean(disp_xyz_mm[:, 2] ** 2)),
@@ -116,23 +116,23 @@ def compute_head_movement_report(raw, report, subject_id, deriv_dir, system):
 
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Displacement (mm, relative to start)")
-    ax.set_title(f"Head movement: {subject_id}")
+    ax.set_title(f"Head movement: {raw_stem}")
     ax.legend()
     ax.grid(True, alpha=0.3)
 
     # ---- Add to report ----
     report.add_figure(
         fig=fig,
-        title=f"{subject_id} head movement",
+        title=f"{raw_stem} head movement",
         section="Head movement",
-        tags=("head-movement", subject_id),
+        tags=("head-movement", raw_stem),
     )
 
     report.add_html(
-        title=f"{subject_id} movement metrics",
+        title=f"{raw_stem} movement metrics",
         html=metrics_df.to_html(index=False, float_format="%.3f"),
         section="Head movement",
-        tags=("head-movement", subject_id, "metrics"),
+        tags=("head-movement", raw_stem, "metrics"),
     )
 
 
