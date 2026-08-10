@@ -20,6 +20,22 @@ import re
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+def make_epochs(data, sfreq, duration, overlap=0.0):
+    """Convierte (n_parcelas, n_tiempos) en épocas."""
+    window = int(round(duration * sfreq))
+    step = int(round(window * (1.0 - overlap)))
+
+    starts = np.arange(
+        0,
+        data.shape[1] - window + 1,
+        step,
+    )
+
+    return np.stack(
+        [data[:, start:start + window] for start in starts],
+        axis=0,
+    )
+
 def _compute_psd_single(vertex_ts, sfreq, window_samples, overlap_samples):
     """
     Compute PSD for a single vertex time series using Welch's method.
@@ -130,7 +146,7 @@ def stc_per_band(morph, power, stc, subject):
     return stc_band_morph
 
 
-def generate_brain_screenshot(stc_band_morph, views, power, surfer_kwargs):
+def generate_brain_screenshot(stc_band_morph, views, power, surfer_kwargs, clim='calculate'):
     """
     Generates a screenshot of the brain visualization for a given SourceEstimate.
 
@@ -153,9 +169,12 @@ def generate_brain_screenshot(stc_band_morph, views, power, surfer_kwargs):
     surfer_kwargs["hemi"] = "lh"
     if views == "dorsal":
         surfer_kwargs["hemi"] = "both"
-    clim = dict(kind="value", lims=[0, max(power) / 2, max(power)])  # Colorband limits
+
+    if clim == 'calculate':
+        clim = dict(kind="value", lims=[0, max(power) / 2, max(power)])  # Colorband limits
+    
     brain = stc_band_morph.plot(
-        **surfer_kwargs, clim=clim
+        **surfer_kwargs, clim= clim
     )  # Plot the brain with the specified clim and additional arguments
     img = brain.screenshot()  # Capture the screenshot
     brain.close()  # Close the interactive brain object
@@ -258,7 +277,7 @@ def bp_gen_band(parc_ts, sfreq, band):
         ]
 
 
-def compute_band_correlations(parc_ts, sfreq, bands):
+def compute_band_correlations(parc_ts, sfreq, bands, connectivity_measure = 'oAEC'):
     """
     Computes correlation matrices for multiple frequency bands.
 
@@ -272,22 +291,105 @@ def compute_band_correlations(parc_ts, sfreq, bands):
     """
     correlations = {}
 
-    for band_name, band in bands.items():
-        # Generate filtered signals for the current band
-        filtered_gen = mne.filter.filter_data(parc_ts, sfreq, band[0], band[1])[
-            np.newaxis, :, :
-        ]
+    if connectivity_measure == 'oAEC':
 
-        # Compute the envelope correlation
-        corr_obj = mne_connectivity.envelope_correlation(
-            filtered_gen, orthogonalize="pairwise"
-        )
+        for band_name, band in bands.items():
+            # Generate filtered signals for the current band
+            filtered_gen = mne.filter.filter_data(parc_ts, sfreq, band[0], band[1])[np.newaxis, :, :]
 
-        # Combine correlations and get dense data
-        corr = corr_obj.combine()
-        correlations[band_name] = corr.get_data(output="dense")[:, :, 0]
+            # Compute the envelope correlation
+            corr_obj = mne_connectivity.envelope_correlation(filtered_gen, orthogonalize="pairwise")
+
+            # Combine correlations and get dense data
+            corr = corr_obj.combine()
+            correlations[band_name] = corr.get_data(output="dense")[:, :, 0]
+
+
+    elif connectivity_measure == 'wPLIdeb':
+
+        parc_epochs = make_epochs(parc_ts,sfreq=sfreq,duration=10.0,overlap=0.0,)
+
+        for band_name, (fmin, fmax) in bands.items():
+
+            con = mne_connectivity.spectral_connectivity_epochs(
+                parc_epochs,
+                method="wpli2_debiased",
+                mode="multitaper",
+                sfreq=sfreq,
+                fmin=fmin,
+                fmax=fmax,
+                faverage=True,
+                mt_adaptive=True,
+                n_jobs=-1,
+                verbose=False,
+            )
+
+            # Shape: (n_parcelas, n_parcelas, 1)
+            correlations[band_name] = con.get_data(output="dense")[:, :, 0]
+
+    elif connectivity_measure == 'wPLI':
+
+        correlations = {}
+
+        continuous_data = parc_ts[np.newaxis, :, :]
+
+        for band_name, (fmin, fmax) in bands.items():
+            freqs = np.arange(fmin, fmax + 0.25, 0.5)
+
+            con = mne_connectivity.spectral_connectivity_time(
+                continuous_data,
+                freqs=freqs,
+                method="wpli",
+                mode="cwt_morlet",#can be multitaper too
+                sfreq=sfreq,
+                fmin=fmin,
+                fmax=fmax,
+                faverage=True,
+                average=True,
+                n_cycles=7.0,
+                # mt_bandwidth=4.0, # if multitaper, uncoment this 
+                padding=10.0,
+                n_jobs=-1,
+                verbose=False,
+            )
+
+            correlations[band_name] = con.get_data(output="dense")[:, :, 0]
+
+    #PLV measures the consistency of phase differences but, unlike wPLI, does not down-weight near-zero phase differences. It is therefore generally more sensitive to source leakage or volume conduction.
+    elif connectivity_measure == 'PLV':
+
+        continuous_data = parc_ts[np.newaxis, :, :]
+
+        for band_name, (fmin, fmax) in bands.items():
+            freqs = np.arange(fmin, fmax + 0.25, 0.5)
+
+            con = mne_connectivity.spectral_connectivity_time(
+                continuous_data,
+                freqs=freqs,
+                method="plv",
+                mode="multitaper",
+                sfreq=sfreq,
+                fmin=fmin,
+                fmax=fmax,
+                faverage=True,
+                average=True,
+                n_cycles=7.0,
+                mt_bandwidth=4.0, # if cwt, coment this 
+                padding=10.0,
+                n_jobs=-1,
+                verbose=False,
+            )
+
+            correlations[band_name] = con.get_data(output="dense")[:, :, 0]
+
+        # MNE fills only one triangle. For symmetric matrices:
+        for band_name, matrix in correlations.items():
+            correlations[band_name] = matrix + matrix.T
 
     return correlations
+
+    
+
 
 
 def plot_corr(corr):

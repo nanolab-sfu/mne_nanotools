@@ -77,6 +77,7 @@ def parse_channel_list(values):
 
     return channels
 
+
 def find_meg(root_dir: str,
                  subject_id: str,
                  session: str | None = None,
@@ -193,7 +194,7 @@ def find_meg(root_dir: str,
     # Filter out processed artifacts (we want the true input raw, not cached outputs)
     def _is_valid_input(p: Path) -> bool:
         n = p.name
-        bad_tokens = ["_tsss", "_filt", "_proj", "_src", "_stc", "_head_pos", "_QC_report"]
+        bad_tokens = ["_tsss","_tsss_mc", "_filt", "_SSP", "_bp", "_proj", "_src", "_stc", "_head_pos", "_QC_report"]
         return not any(tok in n for tok in bad_tokens)
 
     candidates = [c for c in candidates if _is_valid_input(c)]
@@ -326,7 +327,7 @@ def find_erm(root_dir: str,
     candidates = sorted({c.resolve() for c in candidates if c.is_file() or c.is_dir()})
 
     # Remove cached tSSS/filt/proj outputs
-    candidates = [c for c in candidates if "_tsss" not in c.name and "_filt" not in c.name and "_proj" not in c.name]
+    candidates = [c for c in candidates if "_tsss" not in c.name and "_tsss_mc" not in c.name and "_bp" not in c.name and "_notch" not in c.name and "_filt" not in c.name and "_proj" not in c.name]
 
     if not candidates:
         raise FileNotFoundError(
@@ -734,17 +735,37 @@ def preprocess_subject(
     #   sub_NVAR008_rest1_raw.fif -> sub_NVAR008_rest1_raw_tsss.fif
     #   sub-BRS0034_ses-20241217_task-rest_run-1_meg_digFiltered.fif -> ..._meg_digFiltered_tsss.fif
     tsss_raw_path = str(Path(path2raw).with_suffix("")) + "_tsss.fif"
+    tsss_mc_raw_path = str(Path(path2raw).with_suffix("")) + "_tsss_mc.fif"
 
     #   sub_NVAR008_erm_raw.fif -> sub_NVAR008_erm_raw_tsss.fif
     #   sub-BRS0034_ses-20241217_task-erm_meg.fif -> ..._task-erm_meg_tsss.fif
     tsss_erm_path = str(Path(path2raw_erm).with_suffix("")) + "_tsss.fif"
+    tsss_mc_erm_path = str(Path(path2raw_erm).with_suffix("")) + "_tsss_mc.fif"
+
+    # Prefer the movement-compensated cache, but fall back to regular tSSS.
+    existing_tsss_raw_path = next(
+        (path for path in (tsss_mc_raw_path, tsss_raw_path) if os.path.exists(path)),
+        None,
+    )
+    existing_tsss_erm_path = next(
+        (path for path in (tsss_mc_erm_path, tsss_erm_path) if os.path.exists(path)),
+        None,
+    )
+    selected_tsss_raw_path = None
+    selected_tsss_erm_path = None
     extended_proj = []
     if system_upper == "MEGIN":
         try:
-            if os.path.exists(tsss_raw_path) and os.path.exists(tsss_erm_path) and not overwrite:
-                print("→ Loading existing tSSS files...")
-                raw = mne.io.read_raw_fif(tsss_raw_path, preload=True)
-                raw_erm = mne.io.read_raw_fif(tsss_erm_path, preload=True)
+            if not overwrite and existing_tsss_raw_path and existing_tsss_erm_path:
+                print(
+                    "→ Loading existing tSSS files:\n"
+                    f"  data: {existing_tsss_raw_path}\n"
+                    f"  ERM:  {existing_tsss_erm_path}"
+                )
+                raw = mne.io.read_raw_fif(existing_tsss_raw_path, preload=True)
+                raw_erm = mne.io.read_raw_fif(existing_tsss_erm_path, preload=True)
+                selected_tsss_raw_path = existing_tsss_raw_path
+                selected_tsss_erm_path = existing_tsss_erm_path
                 if head_pos is None:
                     try:
                         head_pos = mne.chpi.read_head_pos(head_pos_path)
@@ -754,8 +775,9 @@ def preprocess_subject(
                 # ---------- REST / TASK DATA ----------
                 if _already_has_sss(raw):
                     print("→ Input data already has Maxwell/SSS applied; skipping tSSS and caching as-is...")
-                    if not os.path.exists(tsss_raw_path):
+                    if overwrite or not os.path.exists(tsss_raw_path):
                         raw.save(tsss_raw_path, overwrite=True)
+                    selected_tsss_raw_path = tsss_raw_path
                 else:
                     print("→ Applying tSSS to resting...")
 
@@ -786,15 +808,20 @@ def preprocess_subject(
                         calibration=calibration if os.path.exists(calibration) else None,
                         cross_talk=cross_talk if os.path.exists(cross_talk) else None,
                         st_duration=st_duration,
-                        head_pos=head_pos,
+                        head_pos=head_pos, #If array, movement compensation will be performed.
                     )
-                    raw.save(tsss_raw_path, overwrite=True)
+                    raw.save(tsss_mc_raw_path, overwrite=True)
+                    selected_tsss_raw_path = tsss_mc_raw_path
 
             # ---------- ERM ----------
             if _already_has_sss(raw_erm):
                 print("→ ERM already has Maxwell/SSS applied; skipping SSS and caching as-is...")
-                if not os.path.exists(tsss_erm_path):
+                if selected_tsss_erm_path is None and (
+                    overwrite or not os.path.exists(tsss_erm_path)
+                ):
                     raw_erm.save(tsss_erm_path, overwrite=True)
+                if selected_tsss_erm_path is None:
+                    selected_tsss_erm_path = tsss_erm_path
             else:
                 print("→ Applying SSS to ERM...")
                 raw_erm = preprocessing.max_filter(
@@ -805,7 +832,8 @@ def preprocess_subject(
                     st_duration=sss_erm_st_duration,
                     head_pos=None,
                 )
-                raw_erm.save(tsss_erm_path, overwrite=True)
+                raw_erm.save(tsss_mc_erm_path, overwrite=True)
+                selected_tsss_erm_path = tsss_mc_erm_path
                 
         except Exception as e:
             print(f"⚠️ Could not apply Maxwell filter: {e}")
@@ -819,8 +847,12 @@ def preprocess_subject(
                 f.write("Traceback:\n")
                 f.write(traceback.format_exc())   
         # Rename path2raw to facilitate naming conventions
-        path2raw = tsss_raw_path
-        path2raw_erm = tsss_erm_path
+        path2raw = selected_tsss_raw_path or (
+            tsss_mc_raw_path if os.path.exists(tsss_mc_raw_path) else tsss_raw_path
+        )
+        path2raw_erm = selected_tsss_erm_path or (
+            tsss_mc_erm_path if os.path.exists(tsss_mc_erm_path) else tsss_erm_path
+        )
         
         # ---- PSD after tSSS ----
         fig = raw.compute_psd(fmax=180,
@@ -1240,10 +1272,11 @@ def preprocess_subject(
     report.add_covariance(noise_cov, info=raw_erm.info, title='Noise covariance')
 
     # ---- Save filtered raw ----
-        # MNE Raw.save() writes FIF files. Even if the input is CTF .ds,
+    # MNE Raw.save() writes FIF files. Even if the input is CTF .ds,
     # processed outputs should be cached as FIF.
-    filt_path = str(Path(path2raw).with_suffix("")) + "_filt_proj.fif"
-    filt_erm_path = str(Path(path2raw_erm).with_suffix("")) + "_filt_proj.fif"
+    processing_suffix = "_notch_bp_SSP.fif"
+    filt_path = str(Path(path2raw).with_suffix("")) + processing_suffix
+    filt_erm_path = str(Path(path2raw_erm).with_suffix("")) + processing_suffix
     raw.save(filt_path, overwrite=True)
     raw_erm.save(filt_erm_path, overwrite=True)
 
