@@ -277,7 +277,7 @@ def bp_gen_band(parc_ts, sfreq, band):
         ]
 
 
-def compute_band_correlations(parc_ts, sfreq, bands, connectivity_measure = 'oAEC'):
+def compute_band_oAEC(parc_ts, sfreq, bands):
     """
     Computes correlation matrices for multiple frequency bands.
 
@@ -291,96 +291,17 @@ def compute_band_correlations(parc_ts, sfreq, bands, connectivity_measure = 'oAE
     """
     correlations = {}
 
-    if connectivity_measure == 'oAEC':
+    for band_name, band in bands.items():
+        # Generate filtered signals for the current band
+        filtered_gen = mne.filter.filter_data(parc_ts, sfreq, band[0], band[1])[np.newaxis, :, :]
 
-        for band_name, band in bands.items():
-            # Generate filtered signals for the current band
-            filtered_gen = mne.filter.filter_data(parc_ts, sfreq, band[0], band[1])[np.newaxis, :, :]
+        # Compute the envelope correlation
+        corr_obj = mne_connectivity.envelope_correlation(filtered_gen, orthogonalize="pairwise")
 
-            # Compute the envelope correlation
-            corr_obj = mne_connectivity.envelope_correlation(filtered_gen, orthogonalize="pairwise")
+        # Combine correlations and get dense data
+        corr = corr_obj.combine()
+        correlations[band_name] = corr.get_data(output="dense")[:, :, 0]
 
-            # Combine correlations and get dense data
-            corr = corr_obj.combine()
-            correlations[band_name] = corr.get_data(output="dense")[:, :, 0]
-
-
-    elif connectivity_measure == 'wPLIdeb':
-
-        parc_epochs = make_epochs(parc_ts,sfreq=sfreq,duration=10.0,overlap=0.0,)
-
-        for band_name, (fmin, fmax) in bands.items():
-
-            con = mne_connectivity.spectral_connectivity_epochs(
-                parc_epochs,
-                method="wpli2_debiased",
-                mode="multitaper",
-                sfreq=sfreq,
-                fmin=fmin,
-                fmax=fmax,
-                faverage=True,
-                mt_adaptive=True,
-                n_jobs=-1,
-                verbose=False,
-            )
-
-            # Shape: (n_parcelas, n_parcelas, 1)
-            correlations[band_name] = con.get_data(output="dense")[:, :, 0]
-
-    elif connectivity_measure == 'wPLI':
-
-        correlations = {}
-
-        continuous_data = parc_ts[np.newaxis, :, :]
-
-        for band_name, (fmin, fmax) in bands.items():
-            freqs = np.arange(fmin, fmax + 0.25, 0.5)
-
-            con = mne_connectivity.spectral_connectivity_time(
-                continuous_data,
-                freqs=freqs,
-                method="wpli",
-                mode="multitaper",#can be cwt_morlet too
-                sfreq=sfreq,
-                fmin=fmin,
-                fmax=fmax,
-                faverage=True,
-                average=True,
-                n_cycles=7.0,
-                mt_bandwidth=4.0, # if multitaper, uncoment this 
-                padding=10.0,
-                n_jobs=-1,
-                verbose=False,
-            )
-
-            correlations[band_name] = con.get_data(output="dense")[:, :, 0]
-
-    #PLV measures the consistency of phase differences but, unlike wPLI, does not down-weight near-zero phase differences. It is therefore generally more sensitive to source leakage or volume conduction.
-    elif connectivity_measure == 'PLV':
-
-        continuous_data = parc_ts[np.newaxis, :, :]
-
-        for band_name, (fmin, fmax) in bands.items():
-            freqs = np.arange(fmin, fmax + 0.25, 0.5)
-
-            con = mne_connectivity.spectral_connectivity_time(
-                continuous_data,
-                freqs=freqs,
-                method="plv",
-                mode="multitaper",
-                sfreq=sfreq,
-                fmin=fmin,
-                fmax=fmax,
-                faverage=True,
-                average=True,
-                n_cycles=7.0,
-                mt_bandwidth=4.0, # if cwt, comment this
-                padding=10.0,
-                n_jobs=-1,
-                verbose=False,
-            )
-
-            correlations[band_name] = con.get_data(output="dense")[:, :, 0]
 
         # MNE fills only one triangle. For symmetric matrices:
         for band_name, matrix in correlations.items():
@@ -389,8 +310,112 @@ def compute_band_correlations(parc_ts, sfreq, bands, connectivity_measure = 'oAE
     return correlations
 
     
+def compute_band_wPLI(parc_ts, sfreq, bands, n_jobs=1, debiased=True):
+    # 300 s -> aproximadamente 30 épocas de 10 s
+    epochs = make_epochs(
+        parc_ts,
+        sfreq=sfreq,
+        duration=10.0,
+        overlap=0.0,
+    )
 
+    band_names = list(bands)
+    fmin = tuple(bands[name][0] for name in band_names)
+    fmax = tuple(bands[name][1] for name in band_names)
 
+    con = mne_connectivity.spectral_connectivity_epochs(
+        epochs,
+        method="wpli2_debiased" if debiased else "wpli",
+        mode="multitaper",
+        sfreq=sfreq,
+        fmin=fmin,
+        fmax=fmax,
+        faverage=True,
+
+        # Mucho más rápido que True; normalmente suficiente.
+        mt_adaptive=False,
+        mt_low_bias=True,
+
+        n_jobs=n_jobs,
+        block_size=1000,
+        verbose=True,
+    )
+
+    # Shape: (n_rois, n_rois, n_bandas)
+    dense = con.get_data(output="dense")
+
+    # MNE almacena solamente un triángulo para medidas bivariadas.
+    dense = dense + dense.transpose(1, 0, 2)
+
+    return {
+        band_name: dense[:, :, band_idx]
+        for band_idx, band_name in enumerate(band_names)
+    }
+
+def compute_band_PLV(parc_ts, sfreq, bands, n_jobs=1, epoch_duration=10.0):
+    """
+    Compute Phase-Locking Value (PLV) connectivity matrices across epochs.
+
+    Parameters
+    ----------
+    parc_ts : ndarray, shape (n_rois, n_times)
+        Continuous parcellated time series.
+    sfreq : float
+        Sampling frequency in Hz.
+    bands : dict
+        Frequency bands, for example:
+        {"alpha": (8, 12), "beta": (15, 29)}.
+    n_jobs : int
+        Number of parallel workers.
+    epoch_duration : float
+        Duration of each epoch in seconds.
+
+    Returns
+    -------
+    plv_matrices : dict
+        Dictionary mapping each band name to a symmetric PLV matrix with
+        shape (n_rois, n_rois).
+    """
+    epochs = make_epochs(
+        parc_ts,
+        sfreq=sfreq,
+        duration=epoch_duration,
+        overlap=0.0,
+    )
+
+    band_names = list(bands)
+    fmin = tuple(bands[name][0] for name in band_names)
+    fmax = tuple(bands[name][1] for name in band_names)
+
+    con = mne_connectivity.spectral_connectivity_epochs(
+        epochs,
+        method="plv",
+        mode="multitaper",
+        sfreq=sfreq,
+        fmin=fmin,
+        fmax=fmax,
+        faverage=True,
+        mt_adaptive=False,
+        mt_low_bias=True,
+        n_jobs=n_jobs,
+        block_size=1000,
+        verbose=True,
+    )
+
+    # Shape: (n_rois, n_rois, n_bands)
+    dense = con.get_data(output="dense")
+
+    # MNE stores only one triangle for bivariate connectivity measures.
+    dense = dense + dense.transpose(1, 0, 2)
+
+    # By definition, each signal is perfectly phase-locked with itself.
+    for band_idx in range(len(band_names)):
+        np.fill_diagonal(dense[:, :, band_idx], 1.0)
+
+    return {
+        band_name: dense[:, :, band_idx]
+        for band_idx, band_name in enumerate(band_names)
+    }
 
 def plot_corr(corr):
     for band_name, band in corr.items():
