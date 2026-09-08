@@ -447,7 +447,7 @@ def plot_corr_singlefig(corr):
     plt.show()
 
 
-def plot_corr_with_labels(corr, labels, out_dir):
+def plot_corr_with_labels(corr, labels, out_dir,metric):
     """
     Plot connectivity matrices with optional reordering and boundary marking.
 
@@ -557,6 +557,6 @@ def plot_corr_with_labels(corr, labels, out_dir):
         ax.set_xticklabels(x_labels, rotation=90, fontsize=8)
         ax.set_yticks([50, 150])
         ax.set_yticklabels(["LH", "RH"], fontsize=8)
-        output_path = os.path.join(out_dir, f"AEC_Mean_{band_name}.png")
+        output_path = os.path.join(out_dir, f"{metric}_Mean_{band_name}.png")
         plt.savefig(output_path, dpi=300, bbox_inches="tight")
         plt.show()

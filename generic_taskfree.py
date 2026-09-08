@@ -78,6 +78,33 @@ def parse_channel_list(values):
     return channels
 
 
+def _filename_processing_state(path: str | Path) -> str:
+    """Classify a MEGIN input name as raw, tSSS, or movement-compensated tSSS."""
+    name = Path(path).name.lower()
+    if "_tsss_mc" in name:
+        return "tsss_mc"
+    if "_tsss" in name:
+        return "tsss"
+    return "raw"
+
+
+def _strip_tsss_suffix(path: str | Path) -> Path:
+    """Return the input path without a terminal _tsss[_mc] processing suffix."""
+    path = Path(path)
+    stem = re.sub(r"_tsss(?:_mc)?$", "", path.stem, flags=re.IGNORECASE)
+    return path.with_name(stem + path.suffix)
+
+
+def _keep_input_candidate(path: Path) -> bool:
+    """Exclude downstream products while retaining raw/tSSS/tSSS-MC inputs."""
+    name = path.name.lower()
+    downstream_tokens = (
+        "_filt", "_ssp", "_bp", "_notch", "_proj", "_src", "_stc",
+        "_head_pos", "_qc_report",
+    )
+    return not any(token in name for token in downstream_tokens)
+
+
 def find_meg(root_dir: str,
                  subject_id: str,
                  session: str | None = None,
@@ -191,13 +218,9 @@ def find_meg(root_dir: str,
     # De-duplicate and keep files only
     candidates = sorted({c.resolve() for c in candidates if c.is_file() or c.is_dir()})
 
-    # Filter out processed artifacts (we want the true input raw, not cached outputs)
-    def _is_valid_input(p: Path) -> bool:
-        n = p.name
-        bad_tokens = ["_tsss","_tsss_mc", "_filt", "_SSP", "_bp", "_proj", "_src", "_stc", "_head_pos", "_QC_report"]
-        return not any(tok in n for tok in bad_tokens)
-
-    candidates = [c for c in candidates if _is_valid_input(c)]
+    # Keep Maxwell-filtered files as fallbacks, but never confuse later pipeline
+    # products (filtered/SSP/source files) with primary inputs.
+    candidates = [c for c in candidates if _keep_input_candidate(c)]
 
     if not candidates:
         raise FileNotFoundError(
@@ -242,7 +265,19 @@ def find_meg(root_dir: str,
 
         return s
 
+    # Prefer a true input whenever one is available. If the dataset only ships
+    # Maxwell-filtered data, prefer movement-compensated tSSS over regular tSSS.
+    raw_candidates = [c for c in candidates if _filename_processing_state(c) == "raw"]
+    mc_candidates = [c for c in candidates if _filename_processing_state(c) == "tsss_mc"]
+    tsss_candidates = [c for c in candidates if _filename_processing_state(c) == "tsss"]
+    candidates = raw_candidates or mc_candidates or tsss_candidates
     candidates = sorted(candidates, key=score, reverse=True)
+
+    if not raw_candidates:
+        print(
+            "⚠️ No unprocessed MEG input found; using the best available "
+            f"{_filename_processing_state(candidates[0])} file."
+        )
 
     if len(candidates) > 1:
         print("Multiple candidates found. Using best match:")
@@ -326,8 +361,8 @@ def find_erm(root_dir: str,
 
     candidates = sorted({c.resolve() for c in candidates if c.is_file() or c.is_dir()})
 
-    # Remove cached tSSS/filt/proj outputs
-    candidates = [c for c in candidates if "_tsss" not in c.name and "_tsss_mc" not in c.name and "_bp" not in c.name and "_notch" not in c.name and "_filt" not in c.name and "_proj" not in c.name]
+    # Keep Maxwell-filtered files as fallbacks, excluding downstream products.
+    candidates = [c for c in candidates if _keep_input_candidate(c)]
 
     if not candidates:
         raise FileNotFoundError(
@@ -336,10 +371,23 @@ def find_erm(root_dir: str,
             "Tried MNE-style and BIDS-style ERM patterns.\n"
         )
 
+    # Empty-room recordings do not normally use movement compensation. Prefer
+    # raw, then regular tSSS, accepting _tsss_mc only as a last-resort fallback.
+    raw_candidates = [c for c in candidates if _filename_processing_state(c) == "raw"]
+    tsss_candidates = [c for c in candidates if _filename_processing_state(c) == "tsss"]
+    mc_candidates = [c for c in candidates if _filename_processing_state(c) == "tsss_mc"]
+    candidates = raw_candidates or tsss_candidates or mc_candidates
+
     if ses_norm is not None:
         candidates = sorted(candidates, key=lambda p: (0 if f"/{ses_norm}/" in p.as_posix() else 1, len(p.name), p.name))
     else:
         candidates = sorted(candidates, key=lambda p: (len(p.name), p.name))
+
+    if not raw_candidates:
+        print(
+            "⚠️ No unprocessed ERM input found; using the best available "
+            f"{_filename_processing_state(candidates[0])} file."
+        )
 
     if len(candidates) > 1:
         print("Multiple ERM candidates found. Using best match:")
@@ -369,6 +417,40 @@ def _already_has_sss(r: mne.io.BaseRaw) -> bool:
         if isinstance(entry, dict) and ("max_info" in entry):
             return True
     return False
+
+
+def _classify_loaded_input(path: str | Path, raw: mne.io.BaseRaw, label: str) -> str:
+    """Classify an input using both its filename and FIF processing history."""
+    filename_state = _filename_processing_state(path)
+    history_has_sss = _already_has_sss(raw)
+
+    if filename_state != "raw" and not history_has_sss:
+        print(
+            f"⚠️ {label} is named as {filename_state}, but its FIF processing "
+            "history does not contain Maxwell/SSS metadata. It will still be "
+            "treated as processed to prevent accidental double processing."
+        )
+        return filename_state
+
+    if filename_state == "raw" and history_has_sss:
+        print(
+            f"⚠️ {label} has Maxwell/SSS processing history despite lacking a "
+            "tSSS suffix. It will be treated as already processed."
+        )
+        return "tsss"
+
+    return filename_state
+
+
+def _head_pos_candidates(input_path: str | Path) -> list[Path]:
+    """Return likely .pos sidecars for raw or already-tSSS input names."""
+    path = Path(input_path)
+    base_path = _strip_tsss_suffix(path)
+    candidates = [
+        base_path.with_name(base_path.stem + "_head_pos.pos"),
+        path.with_name(path.stem + "_head_pos.pos"),
+    ]
+    return list(dict.fromkeys(candidates))
 
 
 # ----------------------------------------------------------
@@ -633,11 +715,10 @@ def preprocess_subject(
         path2raw = os.path.join(meg_dir, task_basename.format(sub=subject_id, task=task))
 
 
-    # ---- Head position path (derived from input FIF filename) ----
-    # Examples:
-    #   sub_NVAR008_rest1_raw.fif -> sub_NVAR008_rest1_raw_head_pos.pos
-    #   sub-BRS0034_ses-20241217_task-rest_run-1_meg_digFiltered.fif -> ..._meg_digFiltered_head_pos.pos
-    head_pos_path = str(Path(path2raw).with_suffix("") ) + "_head_pos.pos"
+    # Prefer a .pos sidecar named after the pre-Maxwell input. This also avoids
+    # names such as *_tsss_mc_head_pos.pos when a public dataset only ships tSSS.
+    head_pos_candidates = _head_pos_candidates(path2raw)
+    head_pos_path = str(head_pos_candidates[0])
 
     if erm_file is not None:
         path2raw_erm = str(Path(erm_file).expanduser().resolve())
@@ -654,8 +735,6 @@ def preprocess_subject(
     # ---- tSSS calibration files ----
     calibration = os.path.join(tsss_dir, "sss_cal.dat")
     cross_talk = os.path.join(tsss_dir, "ct_sparse.fif")
-    if not os.path.exists(calibration) or not os.path.exists(cross_talk):
-        print("⚠️ calibration/crosstalk not found, continuing without them (MNE will handle gracefully).")
 
     # ---- Report initialization ----
     report = Report(title=Path(os.path.basename(path2raw)).stem  + "_QC_report", raw_psd=False)
@@ -665,6 +744,20 @@ def preprocess_subject(
     raw.del_proj()
     raw_erm = preprocessing.read_data(path2raw_erm)
     raw_erm.del_proj()
+
+    input_state = _classify_loaded_input(path2raw, raw, "MEG input")
+    erm_input_state = _classify_loaded_input(path2raw_erm, raw_erm, "ERM input")
+    print(f"→ MEG input state: {input_state}")
+    print(f"→ ERM input state: {erm_input_state}")
+    if (
+        system_upper == "MEGIN"
+        and (input_state == "raw" or erm_input_state == "raw")
+        and (not os.path.exists(calibration) or not os.path.exists(cross_talk))
+    ):
+        print(
+            "⚠️ calibration/crosstalk not found, continuing without them "
+            "(MNE will handle gracefully)."
+        )
     
     if system_upper == "CTF" and os.path.isfile(os.path.join(meg_dir,f"{subject_id}_{session}_hsp_ready.fif")):
        path2hsp=os.path.join(meg_dir,f"{subject_id}_{session}_hsp_ready.fif")
@@ -674,55 +767,94 @@ def preprocess_subject(
        print("→ Adding missing fiducials:", fids.keys(), "HSP:", hsp.shape, "HPI:", hpi.shape)
        raw = io_handlers.inject_dig_into_raw(raw, fids=fids, hsp=hsp, hpi=hpi)
 
-    report.add_raw(raw=raw, title="Raw Resting", scalings='auto')
+    input_label = {
+        "raw": "Raw resting input",
+        "tsss": "Resting input (already tSSS)",
+        "tsss_mc": "Resting input (already tSSS + movement compensation)",
+    }[input_state]
+    report.add_raw(raw=raw, title=input_label, scalings='auto')
 
-    # ---- Head Movement Report ----
-
-    try: 
-        print("→ Adding head movement report:")
-        preprocessing.compute_head_movement_report(raw, report, Path(os.path.basename(path2raw)).stem, deriv_dir, system_upper)
-    
-    except Exception as e:
-        print(f"⚠️ Head movement report failed: {e}")
-
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        with open(log_file, "w") as f:
-            f.write("⚠️ Head movement report failed: \n")
-            f.write(f"Timestamp: {timestamp}\n\n")
-            f.write("Error message:\n")
-            f.write(str(e) + "\n\n")
-            f.write("Traceback:\n")
-            f.write(traceback.format_exc())
-
-    # ---- PSD before tSSS ----
-    fig = raw.compute_psd(fmax=200,
-            method="welch", picks=['meg'],
-            n_fft=int(4 * raw.info["sfreq"]),     # 4-second window
-            n_overlap=int(2 * raw.info["sfreq"]),     # 50% overlap (2-second)
-            average='mean',
-            window='hann').plot(picks="data", exclude="bads", amplitude=True, show=False)
-    report.add_figure(fig=fig, title="Raw PSD")
-
-    # ---- Head position and channel renaming----
-    if system_upper == "MEGIN":
+    # ---- Head movement, head position, and pre-tSSS PSD ----
+    head_pos = None
+    if system_upper == "MEGIN" and input_state == "raw":
         try:
-            #head_pos_path = os.path.join(meg_dir,  "head_pos.pos")
-            head_pos = mne.chpi.read_head_pos(head_pos_path)
+            print("→ Adding head movement report:")
+            preprocessing.compute_head_movement_report(
+                raw,
+                report,
+                Path(os.path.basename(path2raw)).stem,
+                deriv_dir,
+                system_upper,
+            )
         except Exception as e:
-            print(f"⚠️ Could not read head_pos from {head_pos_path}: {e}, it will be computed now")
-            head_pos = preprocessing.compute_head_position(raw)
-            mne.chpi.write_head_pos(head_pos_path, head_pos)
-
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            print(f"⚠️ Head movement report failed: {e}")
             with open(log_file, "w") as f:
-                f.write(f"⚠️ Could not read head_pos from {head_pos_path}. it was computed\n")
-                f.write(f"Timestamp: {timestamp}\n\n")
+                f.write("⚠️ Head movement report failed:\n")
+                f.write(f"Timestamp: {datetime.now().strftime('%Y%m%d_%H%M%S')}\n\n")
                 f.write("Error message:\n")
                 f.write(str(e) + "\n\n")
                 f.write("Traceback:\n")
                 f.write(traceback.format_exc())
+
+        existing_head_pos_path = next(
+            (candidate for candidate in head_pos_candidates if candidate.exists()),
+            None,
+        )
+        if existing_head_pos_path is not None:
+            print(f"→ Reading existing head position: {existing_head_pos_path}")
+            head_pos = mne.chpi.read_head_pos(existing_head_pos_path)
+            head_pos_path = str(existing_head_pos_path)
+        else:
+            print(f"→ Computing head position and saving it to: {head_pos_path}")
+            head_pos = preprocessing.compute_head_position(raw)
+            mne.chpi.write_head_pos(head_pos_path, head_pos)
+
+    elif system_upper == "MEGIN":
+        print(
+            f"→ Input is already {input_state}; skipping cHPI head-position "
+            "estimation and signal-based head-movement report."
+        )
+        existing_head_pos_path = next(
+            (candidate for candidate in head_pos_candidates if candidate.exists()),
+            None,
+        )
+        if existing_head_pos_path is not None:
+            try:
+                historical_head_pos = mne.chpi.read_head_pos(existing_head_pos_path)
+                fig = mne.viz.plot_head_positions(
+                    historical_head_pos,
+                    mode="traces",
+                    info=raw.info,
+                )
+                report.add_figure(
+                    fig=fig,
+                    title="Head movement from precomputed position file",
+                    caption=(
+                        "Historical movement before compensation; positions were "
+                        f"read from {existing_head_pos_path.name}."
+                    ),
+                )
+                print(f"→ Added historical head movement from: {existing_head_pos_path}")
+            except Exception as e:
+                print(f"⚠️ Could not plot precomputed head positions: {e}")
+
+    # A pre-tSSS PSD is meaningful only when the selected input is unprocessed.
+    if input_state == "raw":
+        fig = raw.compute_psd(
+            fmax=200,
+            method="welch",
+            picks=["meg"],
+            n_fft=int(4 * raw.info["sfreq"]),
+            n_overlap=int(2 * raw.info["sfreq"]),
+            average="mean",
+            window="hann",
+        ).plot(picks="data", exclude="bads", amplitude=True, show=False)
+        report.add_figure(fig=fig, title="Raw PSD before tSSS")
     else:
-        head_pos = None
+        print("→ Skipping pre-tSSS PSD because the selected input is already processed.")
+
+    # ---- CTF channel renaming ----
+    if system_upper != "MEGIN":
         mapping = {"HEOG": "eog", "VEOG": "eog","ECG": "ecg"}
         ch_type_map = {ch: typ for ch, typ in mapping.items() if ch in raw.ch_names}
         if ch_type_map:
@@ -730,100 +862,98 @@ def preprocess_subject(
         
         raw.pick(["meg", "stim", "misc", "eog", "ecg"]).load_data()
 
-    # ---- Cached tSSS paths (derived from input FIF filenames) ----
-    # Examples:
-    #   sub_NVAR008_rest1_raw.fif -> sub_NVAR008_rest1_raw_tsss.fif
-    #   sub-BRS0034_ses-20241217_task-rest_run-1_meg_digFiltered.fif -> ..._meg_digFiltered_tsss.fif
+    # ---- Cached tSSS paths (only meaningful for unprocessed inputs) ----
     tsss_raw_path = str(Path(path2raw).with_suffix("")) + "_tsss.fif"
     tsss_mc_raw_path = str(Path(path2raw).with_suffix("")) + "_tsss_mc.fif"
-
-    #   sub_NVAR008_erm_raw.fif -> sub_NVAR008_erm_raw_tsss.fif
-    #   sub-BRS0034_ses-20241217_task-erm_meg.fif -> ..._task-erm_meg_tsss.fif
     tsss_erm_path = str(Path(path2raw_erm).with_suffix("")) + "_tsss.fif"
     tsss_mc_erm_path = str(Path(path2raw_erm).with_suffix("")) + "_tsss_mc.fif"
 
-    # Prefer the movement-compensated cache, but fall back to regular tSSS.
-    existing_tsss_raw_path = next(
-        (path for path in (tsss_mc_raw_path, tsss_raw_path) if os.path.exists(path)),
-        None,
-    )
-    existing_tsss_erm_path = next(
-        (path for path in (tsss_mc_erm_path, tsss_erm_path) if os.path.exists(path)),
-        None,
-    )
-    selected_tsss_raw_path = None
-    selected_tsss_erm_path = None
+    existing_tsss_raw_path = None
+    if input_state == "raw" and not overwrite:
+        existing_tsss_raw_path = next(
+            (path for path in (tsss_mc_raw_path, tsss_raw_path) if os.path.exists(path)),
+            None,
+        )
+
+    existing_tsss_erm_path = None
+    if erm_input_state == "raw" and not overwrite:
+        # ERM has no head to movement-compensate, so regular tSSS is preferred.
+        existing_tsss_erm_path = next(
+            (path for path in (tsss_erm_path, tsss_mc_erm_path) if os.path.exists(path)),
+            None,
+        )
+
+    selected_tsss_raw_path = path2raw if input_state != "raw" else None
+    selected_tsss_erm_path = path2raw_erm if erm_input_state != "raw" else None
     extended_proj = []
+
     if system_upper == "MEGIN":
         try:
-            if not overwrite and existing_tsss_raw_path and existing_tsss_erm_path:
-                print(
-                    "→ Loading existing tSSS files:\n"
-                    f"  data: {existing_tsss_raw_path}\n"
-                    f"  ERM:  {existing_tsss_erm_path}"
-                )
-                raw = mne.io.read_raw_fif(existing_tsss_raw_path, preload=True)
-                raw_erm = mne.io.read_raw_fif(existing_tsss_erm_path, preload=True)
-                selected_tsss_raw_path = existing_tsss_raw_path
-                selected_tsss_erm_path = existing_tsss_erm_path
-                if head_pos is None:
-                    try:
-                        head_pos = mne.chpi.read_head_pos(head_pos_path)
-                    except Exception:
-                        head_pos = None
-            else:
-                # ---------- REST / TASK DATA ----------
-                if _already_has_sss(raw):
-                    print("→ Input data already has Maxwell/SSS applied; skipping tSSS and caching as-is...")
-                    if overwrite or not os.path.exists(tsss_raw_path):
-                        raw.save(tsss_raw_path, overwrite=True)
-                    selected_tsss_raw_path = tsss_raw_path
-                else:
-                    print("→ Applying tSSS to resting...")
+            task_needs_maxwell = input_state == "raw" and existing_tsss_raw_path is None
 
-                    # Build extended projections from ERM
-                    if eSSS: 
-
-                        for i, (low_freq, high_freq) in enumerate(eSSS):
-                            print(f"Computing projections for band {low_freq}-{high_freq} Hz")
-                            filt_erm = raw_erm.copy().filter(l_freq=low_freq, h_freq=high_freq)
-                            # You can customize number of components per band
-                            if i == 0:
-                                n_mag, n_grad = 1, 1
-                            else:
-                                n_mag, n_grad = 3, 3
-
-                            proj = mne.compute_proj_raw(
-                                filt_erm,
-                                meg="combined",
-                                n_mag=n_mag,
-                                n_grad=n_grad,
-                                verbose = False,
-                            )
-                            extended_proj.extend(proj)
-
-                    raw = preprocessing.max_filter(
-                        raw,
-                        extended_proj=extended_proj,
-                        calibration=calibration if os.path.exists(calibration) else None,
-                        cross_talk=cross_talk if os.path.exists(cross_talk) else None,
-                        st_duration=st_duration,
-                        head_pos=head_pos, #If array, movement compensation will be performed.
+            # eSSS must be derived from the unprocessed empty-room signal. An
+            # already-SSS ERM no longer provides the intended external basis.
+            if task_needs_maxwell and eSSS:
+                if erm_input_state != "raw":
+                    print(
+                        "⚠️ eSSS was requested, but the available ERM is already "
+                        f"{erm_input_state}. Disabling eSSS for this run."
                     )
-                    raw.save(tsss_mc_raw_path, overwrite=True)
-                    selected_tsss_raw_path = tsss_mc_raw_path
+                else:
+                    for i, (low_freq, high_freq) in enumerate(eSSS):
+                        print(f"Computing eSSS projections for {low_freq}-{high_freq} Hz")
+                        filt_erm = raw_erm.copy().filter(
+                            l_freq=low_freq,
+                            h_freq=high_freq,
+                        )
+                        if i == 0:
+                            n_mag, n_grad = 1, 1
+                        else:
+                            n_mag, n_grad = 3, 3
+                        proj = mne.compute_proj_raw(
+                            filt_erm,
+                            meg="combined",
+                            n_mag=n_mag,
+                            n_grad=n_grad,
+                            verbose=False,
+                        )
+                        extended_proj.extend(proj)
+
+            # ---------- REST / TASK DATA ----------
+            if input_state != "raw":
+                print(
+                    f"→ MEG input is already {input_state}; skipping Maxwell/tSSS "
+                    "regardless of --overwrite."
+                )
+            elif existing_tsss_raw_path is not None:
+                print(f"→ Loading existing tSSS data: {existing_tsss_raw_path}")
+                raw = mne.io.read_raw_fif(existing_tsss_raw_path, preload=True)
+                selected_tsss_raw_path = existing_tsss_raw_path
+            else:
+                print("→ Applying tSSS with movement compensation to resting data...")
+                raw = preprocessing.max_filter(
+                    raw,
+                    extended_proj=extended_proj,
+                    calibration=calibration if os.path.exists(calibration) else None,
+                    cross_talk=cross_talk if os.path.exists(cross_talk) else None,
+                    st_duration=st_duration,
+                    head_pos=head_pos,
+                )
+                raw.save(tsss_mc_raw_path, overwrite=True)
+                selected_tsss_raw_path = tsss_mc_raw_path
 
             # ---------- ERM ----------
-            if _already_has_sss(raw_erm):
-                print("→ ERM already has Maxwell/SSS applied; skipping SSS and caching as-is...")
-                if selected_tsss_erm_path is None and (
-                    overwrite or not os.path.exists(tsss_erm_path)
-                ):
-                    raw_erm.save(tsss_erm_path, overwrite=True)
-                if selected_tsss_erm_path is None:
-                    selected_tsss_erm_path = tsss_erm_path
+            if erm_input_state != "raw":
+                print(
+                    f"→ ERM input is already {erm_input_state}; skipping Maxwell/SSS "
+                    "and keeping the original filename."
+                )
+            elif existing_tsss_erm_path is not None:
+                print(f"→ Loading existing tSSS ERM: {existing_tsss_erm_path}")
+                raw_erm = mne.io.read_raw_fif(existing_tsss_erm_path, preload=True)
+                selected_tsss_erm_path = existing_tsss_erm_path
             else:
-                print("→ Applying SSS to ERM...")
+                print("→ Applying SSS/tSSS to ERM (without movement compensation)...")
                 raw_erm = preprocessing.max_filter(
                     raw_erm,
                     extended_proj=extended_proj,
@@ -832,36 +962,46 @@ def preprocess_subject(
                     st_duration=sss_erm_st_duration,
                     head_pos=None,
                 )
-                raw_erm.save(tsss_mc_erm_path, overwrite=True)
-                selected_tsss_erm_path = tsss_mc_erm_path
-                
+                # Empty-room data has no head-position trajectory; do not label
+                # this output as movement-compensated.
+                raw_erm.save(tsss_erm_path, overwrite=True)
+                selected_tsss_erm_path = tsss_erm_path
+
         except Exception as e:
             print(f"⚠️ Could not apply Maxwell filter: {e}")
-
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             with open(log_file, "w") as f:
                 f.write(f"⚠️ Could not apply Maxwell filter: {e}\n")
-                f.write(f"Timestamp: {timestamp}\n\n")
+                f.write(f"Timestamp: {datetime.now().strftime('%Y%m%d_%H%M%S')}\n\n")
                 f.write("Error message:\n")
                 f.write(str(e) + "\n\n")
                 f.write("Traceback:\n")
-                f.write(traceback.format_exc())   
-        # Rename path2raw to facilitate naming conventions
-        path2raw = selected_tsss_raw_path or (
-            tsss_mc_raw_path if os.path.exists(tsss_mc_raw_path) else tsss_raw_path
-        )
-        path2raw_erm = selected_tsss_erm_path or (
-            tsss_mc_erm_path if os.path.exists(tsss_mc_erm_path) else tsss_erm_path
-        )
-        
-        # ---- PSD after tSSS ----
-        fig = raw.compute_psd(fmax=180,
-                method="welch", picks=['meg'],
-                n_fft=int(4 * raw.info["sfreq"]),     # 4-second window
-                n_overlap=int(2 * raw.info["sfreq"]),     # 50% overlap (2-second)
-                average='mean',
-                window='hann').plot(picks="data", exclude="bads", amplitude=True, show=False)
-        report.add_figure(fig=fig, title=f"PSD after tSSS, eSSS:{eSSS}")
+                f.write(traceback.format_exc())
+            raise
+
+        path2raw = selected_tsss_raw_path
+        path2raw_erm = selected_tsss_erm_path
+
+        # A processed-only public input gets one accurately labelled PSD, not a
+        # duplicate figure incorrectly presented as the pre-tSSS spectrum.
+        final_state = _filename_processing_state(path2raw)
+        if input_state == "raw":
+            applied_esss = eSSS if extended_proj else None
+            psd_title = f"PSD after tSSS, eSSS:{applied_esss}"
+        elif final_state == "tsss_mc":
+            psd_title = "Input PSD — already tSSS + movement compensation"
+        else:
+            psd_title = "Input PSD — already Maxwell/SSS/tSSS processed"
+
+        fig = raw.compute_psd(
+            fmax=180,
+            method="welch",
+            picks=["meg"],
+            n_fft=int(4 * raw.info["sfreq"]),
+            n_overlap=int(2 * raw.info["sfreq"]),
+            average="mean",
+            window="hann",
+        ).plot(picks="data", exclude="bads", amplitude=True, show=False)
+        report.add_figure(fig=fig, title=psd_title)
         
     else:
         print("→ System set to CTF: skipping tSSS/Maxwell filtering; using input data directly.")
@@ -1096,7 +1236,7 @@ def preprocess_subject(
         # of the newly computed ECG/EOG SSP projectors.
         n_existing_proj = len(raw.info.get("projs", []))
 
-        ecg_proj_all, ecg_array = mne.preprocessing.compute_proj_ecg(raw, n_grad=3, n_mag=3, reject=None) # For ECG proj, first pca is always enough
+        ecg_proj_all, ecg_array = mne.preprocessing.compute_proj_ecg(raw, ch_name=ecg_ch, n_grad=3, n_mag=3, reject=None) # For ECG proj, first pca is always enough
         ecg_proj = ecg_proj_all[n_existing_proj:]
         # Keep only the newly estimated ECG projectors.
         fig = mne.viz.plot_projs_joint(ecg_proj, ecg_ev, show=False)
@@ -1116,7 +1256,7 @@ def preprocess_subject(
         _add_figure_with_caption(report, fig, title='ECG Projections', caption="\n".join(ecg_caption_parts))
         
         #print("→ Computing EOG SSP — num of proj selected = {num_proj_eog} ")   
-        eog_proj_all, eog_array = mne.preprocessing.compute_proj_eog(raw, n_grad=3, n_mag=3, reject=None) # Default options look fine
+        eog_proj_all, eog_array = mne.preprocessing.compute_proj_eog(raw, ch_name=eog_ch, n_grad=3, n_mag=3, reject=None) # Default options look fine
         eog_proj = eog_proj_all[n_existing_proj:]
         # Keep only the newly estimated EOG projectors.
         fig = mne.viz.plot_projs_joint(eog_proj, eog_ev, show=False)
@@ -1173,7 +1313,7 @@ def preprocess_subject(
             bcglike_ev = mne.preprocessing.create_ecg_epochs(filt_raw, ch_name=ecg_ch, tmin=-0.2, tmax=0.5).average()
             fig = bcglike_ev.plot_joint(show=False)
             report.add_figure(fig, title="Ballistocardiographic-like events")
-            bcglike_proj_all, bcglike_array = mne.preprocessing.compute_proj_ecg(raw, n_grad=3, n_mag=3, l_freq=1.5, h_freq=8, reject=None) # For ECG proj, first pca is always enough
+            bcglike_proj_all, bcglike_array = mne.preprocessing.compute_proj_ecg(raw, ch_name=ecg_ch, n_grad=3, n_mag=3, l_freq=1.5, h_freq=8, reject=None) # For ECG proj, first pca is always enough
             bcglike_proj = bcglike_proj_all[n_existing_proj:]
             # Keep only the newly estimated BCG-like projectors.
             fig = mne.viz.plot_projs_joint(bcglike_proj, bcglike_ev, show=False)
@@ -1499,6 +1639,25 @@ def preprocess_subject(
                 stc = mne.beamformer.apply_lcmv_raw(raw, filters,
                                                     start=start, stop=stop)
                 
+                if np.iscomplexobj(stc.data):
+                    real_max = np.max(np.abs(stc.data.real))
+                    imag_max = np.max(np.abs(stc.data.imag))
+                    tolerance = 1e-12 * max(real_max, np.finfo(float).eps)
+
+                    if imag_max <= tolerance:
+                        print(
+                            "→ LCMV returned complex dtype with a negligible imaginary "
+                            "component; converting STC to real."
+                        )
+                        
+                    else:
+                        raise ValueError(
+                            "LCMV produced a meaningful complex component: "
+                            f"imag/real={imag_max / max(real_max, np.finfo(float).eps):.6e}"
+                            "Converting STC to real... investigate more?"
+                        )
+
+                stc.data = stc.data.real
 
                 try:
                     stc.save(stc_path, overwrite=True)
