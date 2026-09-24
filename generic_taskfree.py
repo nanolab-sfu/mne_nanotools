@@ -36,6 +36,7 @@ import logging
 import sys
 sys.path.append(os.path.expanduser("~"))
 from mne_nanotools import preprocessing, postprocessing, io_handlers
+from mne_nanotools.artifact_montages import prepare_artifact_reference
 
 # Local file discovery helpers (supports MNE-style + BIDS-style + suffixed variants)
 # ----------------------------------------------------------
@@ -368,7 +369,7 @@ def find_erm(root_dir: str,
         raise FileNotFoundError(
             "No ERM file found.\n"
             f"  root_dir={root_in}\n  subject_id={subject_id}\n  session={session}\n  system={system_upper}\n"
-            "Tried MNE-style and BIDS-style ERM patterns.\n"
+            "Tried MNE-style and BIDS-style ERM  patterns.\n"
         )
 
     # Empty-room recordings do not normally use movement compensation. Prefer
@@ -502,61 +503,34 @@ def save_hyperparameters(
 
     print(f"→ Hyperparameters saved at: {out_path}")
 
-# EOG/ECG projections are added after ERM SSP projectors.
-# MNE returns SSP projectors as one list containing different MEG sensor types.
-# For MEGIN, descriptions usually contain:
-#   - "planar" for gradiometers
-#   - "axial" for magnetometers
-# Therefore, num_proj_* is interpreted as (n_grad, n_mag).
-def _select_proj_by_meg_type(projs, n_proj, label, info, system):
-    # num_proj_* can arrive as an int, [int] from argparse nargs=1,
-    # or occasionally as a tuple/list. In all cases, use one value.
+# num_proj_* selects explicit 1-based PCA indices within each MEG sensor type.
+def _select_proj_by_meg_type(projs, indices, label, info, system):
+    indices = [indices] if isinstance(indices, (int, np.integer)) else list(indices)
+    if any(isinstance(i, (bool, np.bool_)) or not isinstance(i, (int, np.integer))
+           or i not in (0, 1, 2, 3) for i in indices):
+        raise ValueError(f"{label}: use PCA indices 1, 2, 3, or 0 alone for none")
+    if 0 in indices:
+        if len(indices) != 1:
+            raise ValueError(f"{label}: 0 must be used alone")
+        return []
+    indices = list(dict.fromkeys(indices))  # Do not apply duplicates.
+    if not indices:
+        return []
 
-    n_proj = int(n_proj)
-
-    grad_chs = set(info["ch_names"][idx] for idx in mne.pick_types(info, meg="grad"))
-    mag_chs = set(info["ch_names"][idx] for idx in mne.pick_types(info, meg="mag"))
-
-    grad_proj = []
-    mag_proj = []
-    other_meg_proj = []
-
-    for p in projs:
-        desc = p.get("desc", "").lower()
-        col_names = set(p.get("data", {}).get("col_names", []))
-
-        if col_names & grad_chs or "planar" in desc or "grad" in desc:
-            grad_proj.append(p)
-        elif col_names & mag_chs or "axial" in desc or "mag" in desc:
-            mag_proj.append(p)
-        else:
-            other_meg_proj.append(p)
-
-    if system == "MEGIN":
-        selected = grad_proj[:n_proj] + mag_proj[:n_proj]
-        expected = n_proj * 2
-
-        if len(selected) < expected:
-            print(
-                f"⚠️ {label}: requested {n_proj} grad + {n_proj} mag projectors, "
-                f"but found {len(grad_proj)} grad and {len(mag_proj)} mag projectors. "
-                f"Applying {len(selected)} projectors."
-            )
-
+    if system.upper() == "CTF":
+        groups = {"MEG": projs}  # Preserve the original PCA order.
     else:
-        # CTF systems do not have the same planar/axial MEGIN split.
-        # Apply projectors from the available MEG type only.
-        available_proj = grad_proj + mag_proj + other_meg_proj
-        selected = available_proj[:n_proj]
-
-        if len(selected) < n_proj:
-            print(
-                f"⚠️ {label}: requested {n_proj} CTF MEG projectors, "
-                f"but found only {len(available_proj)}. "
-                f"Applying {len(selected)} projectors."
-            )
-
-    return selected
+        groups = {}
+        for kind in ("grad", "mag"):
+            channels = {info["ch_names"][i] for i in
+                        mne.pick_types(info, meg=kind, ref_meg=False, exclude=[])}
+            if channels:
+                groups[kind] = [p for p in projs
+                                if channels.intersection(p["data"]["col_names"])]
+    if not groups or any(max(indices) > len(group) for group in groups.values()):
+        raise ValueError(f"{label}: PCA indices {indices} unavailable; "
+                         f"estimated components: { {k: len(v) for k, v in groups.items()} }")
+    return [group[i - 1] for group in groups.values() for i in indices]
 
 def _add_selected_projs(raw_obj, raw_erm_obj, projs):
     if projs:
@@ -600,11 +574,11 @@ def preprocess_subject(
     bands: dict = None,
     additional_bads: tuple = (),
     n_jobs: int = 8,
-    num_proj_eog: tuple = (1,1), # ECG and EOG proj
-    num_proj_ecg: tuple = (1,1), # ECG and EOG proj
-    num_proj_erm: tuple = (1,1), # SSP empty room
-    num_proj_raw: tuple = (1,1), # SSP generic raw
-    num_proj_bcglike: tuple = (1,1), # SSP bcglike-events
+    num_proj_eog: tuple = (1,), # PCA indices, starting at 1
+    num_proj_ecg: tuple = (1,), # PCA indices, starting at 1
+    num_proj_erm: tuple = (1,), # PCA indices, starting at 1
+    num_proj_raw: tuple = (1,), # PCA indices, starting at 1
+    num_proj_bcglike: tuple = (1,), # PCA indices, starting at 1
     erm_ssp_band: Literal["broad"] | tuple[float, float] | None = None,
     raw_ssp_band : str | None = None,
     bcglike_ssp: bool = False,
@@ -612,6 +586,7 @@ def preprocess_subject(
     system: str = "MEGIN",
     json: bool = False,
     overwrite: bool = False,
+    montages_dir: str | None = None,
 ):
     """
     Generic preprocessing pipeline for MEGIN/CTF resting-state data:
@@ -688,7 +663,7 @@ def preprocess_subject(
         except Exception as e:
             # ---- Write error to txt ----
             print(f"⚠️ Could not find .json file: {e}. System will exit")
-            
+
             with open(log_file, "w") as f:
                 f.write("No .json file found\n")
                 f.write(f"Timestamp: {timestamp}\n\n")
@@ -758,7 +733,7 @@ def preprocess_subject(
             "⚠️ calibration/crosstalk not found, continuing without them "
             "(MNE will handle gracefully)."
         )
-    
+
     if system_upper == "CTF" and os.path.isfile(os.path.join(meg_dir,f"{subject_id}_{session}_hsp_ready.fif")):
        path2hsp=os.path.join(meg_dir,f"{subject_id}_{session}_hsp_ready.fif")
        print(path2hsp)
@@ -859,7 +834,7 @@ def preprocess_subject(
         ch_type_map = {ch: typ for ch, typ in mapping.items() if ch in raw.ch_names}
         if ch_type_map:
             raw.set_channel_types(ch_type_map)
-        
+
         raw.pick(["meg", "stim", "misc", "eog", "ecg"]).load_data()
 
     # ---- Cached tSSS paths (only meaningful for unprocessed inputs) ----
@@ -1002,11 +977,11 @@ def preprocess_subject(
             window="hann",
         ).plot(picks="data", exclude="bads", amplitude=True, show=False)
         report.add_figure(fig=fig, title=psd_title)
-        
+
     else:
         print("→ System set to CTF: skipping tSSS/Maxwell filtering; using input data directly.")
 
-    
+
 
     # ---- Temporal cropping ----
     try:
@@ -1022,12 +997,12 @@ def preprocess_subject(
             f.write(str(e) + "\n\n")
             f.write("Traceback:\n")
             f.write(traceback.format_exc())
-        
+
     try:
         raw_erm.crop(tmin=crop_tmin[0], tmax=crop_tmax[0])
     except Exception as e:
         print(f"⚠️ Empty room cropping failed: {e}")
-        
+
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         with open(log_file, "w") as f:
             f.write("⚠️ Empty room cropping failed: \n")
@@ -1071,37 +1046,39 @@ def preprocess_subject(
         print("→ SSP configuration:")
         if raw_ssp_band:
             raw_ssp_desc = ", ".join([f"{low}-{high} Hz" for low, high in raw_ssp_band])
-            print(f"   - Generic raw SSP: enabled | bands={raw_ssp_desc} | n_proj={num_proj_raw} per band/per available MEG type | n_grad=3, n_mag=3")
+            print(f"   - Generic raw SSP: enabled | bands={raw_ssp_desc} | PCA indices={num_proj_raw} per band/per available MEG type | n_grad=3, n_mag=3")
         else:
             print("   - Generic raw SSP: disabled")
 
-        print(f"   - ECG SSP: enabled | n_proj={num_proj_ecg} per available MEG type | n_grad=3, n_mag=3 | reject=None")
-        print(f"   - EOG SSP: enabled | n_proj={num_proj_eog} per available MEG type | n_grad=3, n_mag=3 | reject=None")
+        print(f"   - ECG SSP: enabled | PCA indices={num_proj_ecg} per available MEG type | n_grad=3, n_mag=3 | reject=None")
+        print(f"   - EOG SSP: enabled | PCA indices={num_proj_eog} per available MEG type | n_grad=3, n_mag=3 | reject=None")
 
         if erm_ssp_band:
             if erm_ssp_band == "broad":
                 erm_ssp_desc = "broadband ERM"
             else:
                 erm_ssp_desc = f"ERM filtered {erm_ssp_band[0]}-{erm_ssp_band[1]} Hz"
-            print(f"   - ERM SSP: enabled | {erm_ssp_desc} | n_proj={num_proj_erm} per available MEG type | n_grad=3, n_mag=3")
+            print(f"   - ERM SSP: enabled | {erm_ssp_desc} | PCA indices={num_proj_erm} per available MEG type | n_grad=3, n_mag=3")
         else:
             print("   - ERM SSP: disabled")
 
         if bcglike_ssp:
-            print(f"   - Ballistocardiographic-like SSP: enabled | ECG-locked | filter=1.5-8 Hz | epoch=-0.2 to 0.5 s | n_proj={num_proj_bcglike} per available MEG type | n_grad=3, n_mag=3 | reject=None")
+            print(f"   - Ballistocardiographic-like SSP: enabled | ECG-locked | filter=1.5-8 Hz | epoch=-0.2 to 0.5 s | PCA indices={num_proj_bcglike} per available MEG type | n_grad=3, n_mag=3 | reject=None")
         else:
             print("   - Ballistocardiographic-like SSP: disabled")
-        #print("→ Computing ECG SSP — num of proj selected = {num_proj_ecg} ")   
+        #print("→ Computing ECG SSP — selected PCA indices = {num_proj_ecg} ")
 
-        if raw_ssp_band: 
+        if raw_ssp_band:
             generic_proj = []
+            projections_by_band = []
             for i, (low, high) in enumerate(raw_ssp_band):
                 #print(f"→ Computing generic (raw) SSP using filtered band {low}-{high} Hz")
                 filt_raw = raw.copy().filter(l_freq=low, h_freq=high)
                 # You can customize number of components per band
                 proj = mne.compute_proj_raw(filt_raw, n_grad=3, n_mag=3, verbose=False)
                 generic_proj.extend(proj)
-            
+                projections_by_band.append(proj)
+
             generic_exp_var = []
             for proj in generic_proj:
                 if "explained_var" in proj:
@@ -1116,16 +1093,10 @@ def preprocess_subject(
                 title="Generic Raw Projections",
                 caption = (f"{generic_ssp_caption}\n"
                            f"Explained variance: {generic_exp_var}\n"
-                           f"Num of projections selected: {num_proj_raw}")
+                           f"Selected PCA indices: {num_proj_raw}")
             )
             selected_generic_proj = []
-            n_per_band = 6  # n_grad=3 + n_mag=3 in mne.compute_proj_raw above
-
-            for j, (low, high) in enumerate(raw_ssp_band):
-                start = j * n_per_band
-                stop = start + n_per_band
-                band_proj = generic_proj[start:stop]
-
+            for (low, high), band_proj in zip(raw_ssp_band, projections_by_band):
                 selected_band_proj = _select_proj_by_meg_type(
                     band_proj,
                     num_proj_raw,
@@ -1151,6 +1122,13 @@ def preprocess_subject(
             f.write(str(e) + "\n\n")
             f.write("Traceback:\n")
             f.write(traceback.format_exc())
+
+    # Resolve named sensor groups once so QC, SSP and BCG use the same reference.
+    montage_directory = Path(montages_dir) if montages_dir else Path(root_dir) / "montages"
+    ecg_ch, temporary_ecg = prepare_artifact_reference(
+        raw, ecg_ch, "ecg", montage_directory, system_upper)
+    eog_ch, temporary_eog = prepare_artifact_reference(
+        raw, eog_ch, "eog", montage_directory, system_upper)
 
     # ---- ECG/EOG QC ----
     ecg_ev = None
@@ -1218,7 +1196,7 @@ def preprocess_subject(
             f.write("Traceback:\n")
             f.write(traceback.format_exc())
 
-    
+
     # ---- SSP ----
     try:
         # Generic SSP projectors were already added and applied above.
@@ -1236,7 +1214,7 @@ def preprocess_subject(
         # of the newly computed ECG/EOG SSP projectors.
         n_existing_proj = len(raw.info.get("projs", []))
 
-        ecg_proj_all, ecg_array = mne.preprocessing.compute_proj_ecg(raw, ch_name=ecg_ch, n_grad=3, n_mag=3, reject=None) # For ECG proj, first pca is always enough
+        ecg_proj_all, ecg_array = mne.preprocessing.compute_proj_ecg(raw, ch_name=ecg_ch, n_grad=3, n_mag=3, reject=None)
         ecg_proj = ecg_proj_all[n_existing_proj:]
         # Keep only the newly estimated ECG projectors.
         fig = mne.viz.plot_projs_joint(ecg_proj, ecg_ev, show=False)
@@ -1247,15 +1225,15 @@ def preprocess_subject(
             exp_var.append('%, ')
         ecg_caption_parts = [
             f"Explained variance:\n{', '.join(exp_var)}",
-            f"Num of projections selected:\n{num_proj_ecg}",
+            f"Selected PCA indices:\n{num_proj_ecg}",
         ]
         if ecg_event_count is not None and heart_rate_bpm is not None:
             ecg_caption_parts.append(
                 f"ECG events used for projector estimation:\n{ecg_event_count}\nEstimated heart rate:\n{heart_rate_bpm:.2f} events/min"
             )
         _add_figure_with_caption(report, fig, title='ECG Projections', caption="\n".join(ecg_caption_parts))
-        
-        #print("→ Computing EOG SSP — num of proj selected = {num_proj_eog} ")   
+
+        #print("→ Computing EOG SSP — selected PCA indices = {num_proj_eog} ")
         eog_proj_all, eog_array = mne.preprocessing.compute_proj_eog(raw, ch_name=eog_ch, n_grad=3, n_mag=3, reject=None) # Default options look fine
         eog_proj = eog_proj_all[n_existing_proj:]
         # Keep only the newly estimated EOG projectors.
@@ -1267,16 +1245,16 @@ def preprocess_subject(
             exp_var.append('%, ')
         eog_caption_parts = [
             f"Explained variance:\n{', '.join(exp_var)}",
-            f"Num of projections selected:\n{num_proj_eog}",
+            f"Selected PCA indices:\n{num_proj_eog}",
         ]
         if eog_event_count is not None and blink_rate_bpm is not None:
             eog_caption_parts.append(
                 f"EOG/blink events used for projector estimation:\n{eog_event_count}\nEstimated blink rate:\n{blink_rate_bpm:.2f} events/min"
             )
         _add_figure_with_caption(report, fig, title='EOG Projections', caption="\n".join(eog_caption_parts))
-        
+
         # ERM SSP can be broadband or computed from a specific band
-        if erm_ssp_band: #To avoid TSSS reduncancy, this is only run if called! 
+        if erm_ssp_band: #To avoid TSSS reduncancy, this is only run if called!
             erm_for_ssp = raw_erm.copy()
             if erm_ssp_band != "broad":
                 if not isinstance(erm_ssp_band, (list, tuple)) or len(erm_ssp_band) != 2:
@@ -1289,7 +1267,7 @@ def preprocess_subject(
                 #print("→ Computing ERM SSP using broadband ERM (no filtering)")
                 erm_ssp_caption = "Broadband ERM SSP projectors; no additional ERM filtering was applied before SSP extraction."
             er_proj = mne.compute_proj_raw(erm_for_ssp, n_grad=3, n_mag=3, verbose=False)
-            
+
             er_exp_var = []
             for proj in er_proj:
                 if "explained_var" in proj:
@@ -1302,28 +1280,28 @@ def preprocess_subject(
                 title="ERM Projections",
                 caption = (f"{erm_ssp_caption}\n"
                            f"Explained variance: {er_exp_var}\n"
-                           f"Num of projections selected: {num_proj_erm}")
+                           f"Selected PCA indices: {num_proj_erm}")
             )
 
-        
-        
+
+
         if bcglike_ssp: #Ballistocardiographic
             #print("→ Computing SSP for ballistocardiographic-like events: bandpass 1.5-8Hz, -200-500 ms")
             filt_raw = raw.copy().filter(l_freq=1.5, h_freq=8)
             bcglike_ev = mne.preprocessing.create_ecg_epochs(filt_raw, ch_name=ecg_ch, tmin=-0.2, tmax=0.5).average()
             fig = bcglike_ev.plot_joint(show=False)
             report.add_figure(fig, title="Ballistocardiographic-like events")
-            bcglike_proj_all, bcglike_array = mne.preprocessing.compute_proj_ecg(raw, ch_name=ecg_ch, n_grad=3, n_mag=3, l_freq=1.5, h_freq=8, reject=None) # For ECG proj, first pca is always enough
+            bcglike_proj_all, bcglike_array = mne.preprocessing.compute_proj_ecg(raw, ch_name=ecg_ch, n_grad=3, n_mag=3, l_freq=1.5, h_freq=8, reject=None)
             bcglike_proj = bcglike_proj_all[n_existing_proj:]
             # Keep only the newly estimated BCG-like projectors.
             fig = mne.viz.plot_projs_joint(bcglike_proj, bcglike_ev, show=False)
             fig.suptitle("Ballistocardiographic-like SSP")
             exp_var = []
-            
+
             for i in range(len(bcglike_proj)):
                 exp_var.append(str(np.round(bcglike_proj[i]['explained_var'],2)))
                 exp_var.append('%, ')
-            _add_figure_with_caption(report, fig, title='Ballistocardiographic-like Projections', caption=f"{', '.join(exp_var)} — num of proj selected = {num_proj_bcglike}")
+            _add_figure_with_caption(report, fig, title='Ballistocardiographic-like Projections', caption=f"{', '.join(exp_var)} — selected PCA indices = {num_proj_bcglike}")
 
         selected_ecg_proj = _select_proj_by_meg_type(ecg_proj, num_proj_ecg, "ECG SSP", raw.info, system_upper)
         _add_selected_projs(raw, raw_erm, selected_ecg_proj)
@@ -1339,12 +1317,12 @@ def preprocess_subject(
             selected_bcglike_proj = _select_proj_by_meg_type( bcglike_proj, num_proj_bcglike, "Ballistocardiographic-like SSP", raw.info, system_upper,)
             _add_selected_projs(raw, raw_erm, selected_bcglike_proj)
 
-        
-            
+
+
         print("→ Applying SSP ECG,EOG and ERM SSP's")
         raw.apply_proj()
         raw_erm.apply_proj()
-        
+
     except Exception as e:
         print(f"⚠️ SSP computation failed: {e}")
 
@@ -1356,6 +1334,10 @@ def preprocess_subject(
             f.write(str(e) + "\n\n")
             f.write("Traceback:\n")
             f.write(traceback.format_exc())
+
+    # Detection proxies must not enter covariance, saved recordings or source modeling.
+    if temporary_ecg or temporary_eog:
+        raw.drop_channels(temporary_ecg + temporary_eog)
 
     # --- Amplitude and gradient thresholds ----
     try:
@@ -1376,13 +1358,13 @@ def preprocess_subject(
         fig = raw.compute_psd(fmax=180, verbose=False).plot(picks="data", exclude="bads", amplitude=True, show=False)
 
         report.add_figure(fig, title="PSD after MAD")
-        
+
         scalings = 'auto'
         if system_upper == "CTF":
             scalings = dict(mag=1e-10, grad=4e-10, eeg=20e-6, eog=150e-6, ecg=5e-4,
                             emg=1e-3, ref_meg=1e-12, misc=1e-3, stim=1,
                             resp=1, chpi=1e-4, whitened=1e2)
-        
+
         fig_butterfly = raw.plot(start=0, duration=raw.times[-1],scalings=scalings, show=False)
         report.add_figure(
             fig_butterfly,
@@ -1390,10 +1372,10 @@ def preprocess_subject(
             caption=f"From first to last BAD_mad window ({bad_times[0][0]:.2f}s–{bad_times[-1][1]:.2f}s)"
         )
 
-    
+
     except Exception as e:
         print(f"⚠️ MAD failed: {e}")
-        
+
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         with open(log_file, "w") as f:
             f.write("⚠️ MAD failed: \n")
@@ -1433,7 +1415,7 @@ def preprocess_subject(
 
     trans_path = os.path.join(meg_dir, f"{subject}-{session}{trans}")
     trans_path = trans_path if os.path.isfile(trans_path) else os.path.join(meg_dir, f"{subject}_{session}{trans}")
-       
+
 
     if os.path.exists(trans_path):
         # Load the .trans file
@@ -1460,7 +1442,7 @@ def preprocess_subject(
 
     else:
         print(f"⚠️ Missing trans file: {trans_path}")
-    
+
 
     # ---- BEM ----
     bem_path = os.path.join(fs_dir, fs_subject, "bem", f"{subject}-5120-5120-5120-bem-sol.fif")
@@ -1471,7 +1453,7 @@ def preprocess_subject(
         os.makedirs(bem_dir, exist_ok=True)
         conductivity = (0.3,)   # Single layer for MEG
         model = mne.make_bem_model(subject=fs_subject, ico=4, #The surface ico downsampling to use, e.g. 5=20484, 4=5120, 3=1280. If None, no subsampling is applied.
-                            conductivity=conductivity, 
+                            conductivity=conductivity,
                             subjects_dir=fs_dir) #bem conductivity model
         bem_sol = mne.make_bem_solution(model)
         mne.write_bem_solution(bem_path, bem_sol)
@@ -1510,7 +1492,7 @@ def preprocess_subject(
         fig = mne.viz.plot_alignment(
             subject=fs_subject,
             subjects_dir=fs_dir,
-            surfaces="white", #white becuase mne use white for sourse reconstruction? 
+            surfaces="white", #white becuase mne use white for sourse reconstruction?
             coord_frame="mri",
             src=src
         )
@@ -1624,7 +1606,7 @@ def preprocess_subject(
                 print(f"→ Computing Source Estimation {inv_method}")
                 start, stop = raw.time_as_index([0,crop_tmax[1]-crop_tmin[1]])
 
-                
+
                 filters = mne.beamformer.make_lcmv(
                     raw.info,
                     fwd,
@@ -1638,7 +1620,7 @@ def preprocess_subject(
 
                 stc = mne.beamformer.apply_lcmv_raw(raw, filters,
                                                     start=start, stop=stop)
-                
+
                 if np.iscomplexobj(stc.data):
                     real_max = np.max(np.abs(stc.data.real))
                     imag_max = np.max(np.abs(stc.data.imag))
@@ -1649,7 +1631,7 @@ def preprocess_subject(
                             "→ LCMV returned complex dtype with a negligible imaginary "
                             "component; converting STC to real."
                         )
-                        
+
                     else:
                         raise ValueError(
                             "LCMV produced a meaningful complex component: "
@@ -1697,7 +1679,7 @@ def preprocess_subject(
 
         surfer_kwargs = dict(surface='pial',
                         hemi='split',
-                        subject=fs_subject, 
+                        subject=fs_subject,
                         subjects_dir=fs_dir,
                         #views="medial",
                         colormap='jet',
@@ -1802,8 +1784,12 @@ def _parse_args():
     p.add_argument("--downsample", type=int, default=500)
     p.add_argument("--crop_tmin", type=float, nargs=2, default=[10.0, 10.0])
     p.add_argument("--crop_tmax", type=float, nargs=2, default=[110.0, 250.0])
-    p.add_argument("--ecg_ch", type=str, default="ECG003")
-    p.add_argument("--eog_ch", type=str, default="EOG001")
+    p.add_argument("--ecg_ch", type=str, default="ECG003",
+                   help="ECG channel, montage name (e.g. ecg_montage, Left-temporal), or auto.")
+    p.add_argument("--eog_ch", type=str, default="EOG001",
+                   help="EOG channel(s), comma-separated, montage name (e.g. eog_montage, Left-frontal), or auto.")
+    p.add_argument("--montages_dir", type=str, default=None,
+                   help="Sensor-list directory; default: <root_dir>/montages. Missing built-in montages are generated.")
     p.add_argument("--reject_mag", type=float, default=4e-12)
     p.add_argument("--reject_grad", type=float, default=4000e-13)
     p.add_argument("--eSSS", type=parse_ranges, default=None, required=False, help="Frequency ranges for eSSS as start-end pairs, e.g. 42-45,50-53")
@@ -1818,12 +1804,11 @@ def _parse_args():
     p.add_argument("--erm_ssp_band", type=str, default=None, help="ERM band for SSP: 'broad' or low-high (e.g. 10-20)")
     p.add_argument("--raw_ssp_band", type=parse_ranges, default=None, required=False, help="Frequency ranges for generic SSP as start-end pairs, e.g. 42-45,50-53")
     p.add_argument("--bcglike_ssp", action="store_true", help="Apply ssp for ballistocardiographic-like events.")
-    p.add_argument("--num_proj_eog", type=int, default=1, help="Number of EOG SSP projectors to apply, respectively. Example: --num_proj_eog 1")
-    p.add_argument("--num_proj_ecg", type=int, default=1, help="Number of ECG SSP projectors to apply, respectively. Example: --num_proj_ecg 1")
-    p.add_argument("--num_proj_erm", type=int, default=1, help="Number of bandlimited ERM SSP projectors to apply, respectively. Example: --num_proj_erm 1")
-    p.add_argument("--num_proj_raw", type=int, default=1, help="Number of bandlimited Raw SSP projectors to apply, respectively. Example: --num_proj_raw 1")
-    p.add_argument("--num_proj_bcglike", type=int, default=1, help="Number of ballistocardiographic-like SSP projectors to apply, respectively. Example: --num_proj_bcglike 1 1")
-    
+    for kind in ("eog", "ecg", "erm", "raw", "bcglike"):
+        p.add_argument(f"--num_proj_{kind}", type=int, nargs="+", choices=(0, 1, 2, 3),
+                       default=[1], help="PCA indices per MEG type, not a count: "
+                       "3 selects only PCA 3; 1 3 selects PCA 1 and 3; 0 selects none.")
+
     # Additional bad channels can be passed as spaces, commas, or both.
     # Examples:
     #   --additional_bads MEG2443 MEG1032
@@ -1833,7 +1818,12 @@ def _parse_args():
     p.add_argument("--verbose", action="store_true", help="Enable verbose MNE output")
     p.add_argument("--json", action = "store_true", help="Only true if .json file with fidutials exists AND was use to generete the coregistation automatically")
     p.add_argument("--overwrite", action = "store_true", help="If called, it will overwrite all the *_tsss.fif, *.stc and report files, allong any other output.")
-    return p.parse_args()
+    args = p.parse_args()
+    for kind in ("eog", "ecg", "erm", "raw", "bcglike"):
+        indices = getattr(args, f"num_proj_{kind}")
+        if 0 in indices and len(indices) != 1:
+            p.error(f"--num_proj_{kind}: 0 must be used alone")
+    return args
 
 
 if __name__ == "__main__":
@@ -1906,6 +1896,7 @@ if __name__ == "__main__":
         crop_tmax=tuple(args.crop_tmax),
         ecg_ch=args.ecg_ch,
         eog_ch=args.eog_ch,
+        montages_dir=args.montages_dir,
         reject_mag=args.reject_mag,
         reject_grad=args.reject_grad,
         eSSS=args.eSSS,
