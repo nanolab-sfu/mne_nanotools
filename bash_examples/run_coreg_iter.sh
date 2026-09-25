@@ -11,3 +11,7 @@ while read -r subj ses; do
         --subjects_dir "$SUBJECTS_DIR"
 
 done < /path/to/subjects_sessions.txt
+
+ROOT="/home/isaant/Documents/BRHRN/"
+SUBJECTS_DIR="MRI/freesurfer"
+
