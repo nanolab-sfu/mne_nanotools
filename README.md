@@ -155,7 +155,7 @@ Supplying `--line_freqs` without values passes an empty list to the external fil
 
 | Flag | CLI default | Meaning and use |
 | --- | --- | --- |
-| `--tsss_dir` | `/Users/isaant/Documents/PosDoc/Projects/tsss_params/2023` | Local author-specific default. Set your own directory containing `sss_cal.dat` and `ct_sparse.fif`. The launcher supplies `TSSS_PARAMS`. |
+| `--tsss_dir` | `/path/to/tsss_params/2023` | Local author-specific default. Set your own directory containing `sss_cal.dat` and `ct_sparse.fif`. The launcher supplies `TSSS_PARAMS`. |
 | `--st_duration` | `10.0` | Temporal window in seconds passed to the Maxwell helper for the MEG recording. |
 | `--sss_erm_st_duration` | `None` | Independent temporal-window setting passed for ERM. The default passes `None`; it does not inherit `st_duration`. ERM receives no head-position trajectory. |
 | `--eSSS` | `None` | Optional external projection basis derived from unprocessed ERM in specified frequency ranges, then passed to the Maxwell helper. Example: `42-45,50-53`. |
