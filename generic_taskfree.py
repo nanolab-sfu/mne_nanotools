@@ -569,7 +569,7 @@ def preprocess_subject(
     subjects_dir_name: str = "MRI/freesurfer",
     compute_bem_if_missing: bool = True,
     bem_watershed: bool = True,
-    inv_method: str = "dSPM",
+    inv_method: str | None = "beamformer",
     snr: float = 3.0,
     bands: dict = None,
     additional_bads: tuple = (),
@@ -1538,21 +1538,13 @@ def preprocess_subject(
 
     # ---- Inverse ----
 
-    # Choose the STC directory based on session
-
-    stc_dir = os.path.join(deriv_dir, inv_method, 'stc')
-
-    # Ensure directory exists
-    os.makedirs(stc_dir, exist_ok=True)
-
-    # Base filename for the STC
-    stc_base = Path(os.path.basename(path2raw)).stem + f"_{inv_method}_stc"
-    stc_path = os.path.join(stc_dir, stc_base)   # <<--- correct final path
-
-
     # Missing files check
     if not os.path.exists(trans_path):
         print(f"⚠️ Missing trans file: {trans_path}")
+        stc = None
+
+    elif inv_method is None:
+        print("→ Skipping source estimation (inv_method=None)")
         stc = None
 
     elif not os.path.exists(bem_path):
@@ -1560,6 +1552,14 @@ def preprocess_subject(
         stc = None
 
     else:
+        # Choose the STC directory based on session
+        stc_dir = os.path.join(deriv_dir, inv_method, 'stc')
+        os.makedirs(stc_dir, exist_ok=True)
+
+        # Base filename for the STC
+        stc_base = Path(os.path.basename(path2raw)).stem + f"_{inv_method}_stc"
+        stc_path = os.path.join(stc_dir, stc_base)
+
         # ------------------ MINIMUM NORM ------------------
         if inv_method != 'beamformer':
             print(f"→ Computing Source Estimation {inv_method}")
@@ -1617,6 +1617,14 @@ def preprocess_subject(
                     weight_norm="unit-noise-gain",
                     rank='info'
                 )
+
+                kernel_dir = os.path.join(deriv_dir, inv_method, 'kernel')
+                os.makedirs(kernel_dir, exist_ok=True)
+                kernel_path = os.path.join(
+                    kernel_dir, Path(os.path.basename(path2raw)).stem + "-lcmv.h5"
+                )
+                filters.save(kernel_path, overwrite=True)
+                print(f"→ Beamformer kernel saved at {kernel_path}")
 
                 stc = mne.beamformer.apply_lcmv_raw(raw, filters,
                                                     start=start, stop=stop)
@@ -1798,7 +1806,9 @@ def _parse_args():
     p.add_argument("--no_compute_bem_if_missing", dest="compute_bem_if_missing", action="store_false")
     p.add_argument("--bem_watershed", action="store_true", default=True)
     p.add_argument("--no_bem_watershed", dest="bem_watershed", action="store_false")
-    p.add_argument("--inv_method", type=str, default="beamformer", choices=["MNE", "dSPM", "sLORETA","beamformer"])
+    p.add_argument("--inv_method", type=lambda value: None if value == "None" else value,
+                   default="beamformer", choices=["MNE", "dSPM", "sLORETA", "beamformer", None],
+                   help="Inverse method; None skips source estimation.")
     p.add_argument("--snr", type=float, default=3.0)
     p.add_argument("--n_jobs", type=int, default=8)
     p.add_argument("--erm_ssp_band", type=str, default=None, help="ERM band for SSP: 'broad' or low-high (e.g. 10-20)")
@@ -1927,7 +1937,7 @@ if __name__ == "__main__":
             args.root_dir,
             "derivatives",
             args.subject_id,
-            args.inv_method,
+            str(args.inv_method),
             "report",
         )
     else:
@@ -1936,7 +1946,7 @@ if __name__ == "__main__":
             "derivatives",
             args.subject_id,
             args.session,
-            args.inv_method,
+            str(args.inv_method),
             "report",
         )
 
