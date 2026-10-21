@@ -186,13 +186,11 @@ def print_memory(label):
 fs_dir = os.path.join(data_dir,'MRI','freesurfer') # Path to FreeSurfer subjects
 meg_dir = os.path.join(data_dir,'MEG',subject,session,'meg') # Path to MEG data
 log_dir = os.path.join(data_dir, 'logfiles')
-output_dir = os.path.join(data_dir, 'derivatives', subject, session, inv_method, 'fsaverage-morphed_stc')
-output_dir = os.path.join(output_dir, run)
+derivatives_dir = os.path.join(data_dir, 'derivatives', subject, session, inv_method)
 output_basename = f"{subject}_{session}_task-rest_{run}_meg"
 stc_dir = os.path.join(data_dir, 'derivatives', subject, session, inv_method, 'stc')
 stc_path = find_stc_path(stc_dir, subject, session, run, inv_method)
 
-os.makedirs(output_dir, exist_ok=True)
 os.makedirs(log_dir, exist_ok=True)
 
 
@@ -270,10 +268,15 @@ try:
     del psd_normalized, band_powers
 
     atlases = {
-        "DK": "aparc",
-        "Schaefer200_17Networks": "Schaefer2018_200Parcels_17Networks_order",
+        "DK": ("aparc", "desikan_killiany_parc"),
+        "Schaefer200_17Networks": (
+            "Schaefer2018_200Parcels_17Networks_order",
+            "schaefer2018_200parcels_17networks_parc",
+        ),
     }
-    for atlas_name, parc in atlases.items():
+    for atlas_name, (parc, atlas_directory) in atlases.items():
+        output_dir = os.path.join(derivatives_dir, atlas_directory, run)
+        os.makedirs(output_dir, exist_ok=True)
         print(f"Parcellating {atlas_name}", flush=True)
         labels = mne.read_labels_from_annot(subject, parc=parc, subjects_dir=fs_dir)
         # Exclude non-cortical annotation entries from the parcel matrices.
