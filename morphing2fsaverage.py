@@ -30,6 +30,8 @@ def parse_args(argv=None):
     p.add_argument("--run", help="Run label, e.g. 1 or run-1; inferred from the name if present.")
     p.add_argument("--inv_method", default="beamformer",
                    choices=["MNE", "dSPM", "sLORETA", "beamformer"], help="Inverse method.")
+    p.add_argument("--json", action="store_true",
+                   help="Resolve the FreeSurfer subject from IntendedFor in the MEG coordsystem JSON.")
     args = p.parse_args(argv)
     args.subject_raw = args.subject
     # Accept a combined identifier or the MEG filename/path containing it.
@@ -126,6 +128,19 @@ def print_memory(label):
 #%% Directories
 fs_dir = os.path.join(data_dir,'MRI','freesurfer') # Path to FreeSurfer subjects
 meg_dir = os.path.join(data_dir,'MEG',subject,session,'meg') # Path to MEG data
+json_path = meg_dir
+if args.json:
+    head_coordinate_file = os.path.join(json_path, f"{subject}_{session}_coordsystem.json")
+    head_coordinates = load_json(head_coordinate_file)
+    intended = strip_bids_prefix(head_coordinates["IntendedFor"])
+    mri_basename = strip_nii_suffix(os.path.basename(intended))
+    fs_subject = extract_bids_id(mri_basename)
+    if not fs_subject:
+        raise ValueError(f"Could not extract a FreeSurfer subject from {intended!r}")
+else:
+    fs_subject = subject
+print(f"MEG subject: {subject}; FreeSurfer subject: {fs_subject}", flush=True)
+
 log_dir = os.path.join(data_dir, 'logfiles')
 output_dir = os.path.join(data_dir, 'derivatives', subject, session, inv_method, 'fsaverage-morphed_stc')
 output_dir = os.path.join(output_dir, run)
@@ -146,7 +161,7 @@ required_MRIfiles = ["lh.sphere.reg", "lh.pial", "lh.white", "lh.inflated",
 required_MEGfiles = [stc_path, stc_path.removesuffix("-lh.stc") + "-rh.stc"]
 
 # Check if all required files exist
-missing_MRIfiles = [ file for file in required_MRIfiles if not os.path.exists(os.path.join(fs_dir, subject, 'surf', file))]
+missing_MRIfiles = [ file for file in required_MRIfiles if not os.path.exists(os.path.join(fs_dir, fs_subject, 'surf', file))]
 missing_MEGfiles = [file for file in required_MEGfiles if not os.path.isfile(file)]
 
 # Open a file to save the logs
@@ -171,10 +186,10 @@ with open(os.path.join(log_dir,"missing_files_log.txt"), "a") as log_file:  # "a
 try:
     # Load the SourceEstimate for the subject
     stc = mne.read_source_estimate(stc_path)
-    stc.subject = subject
+    stc.subject = fs_subject
     print_memory("after loading STC")
     # Compute the morph to fsaverage
-    morph = mne.compute_source_morph(stc,subject_from=subject,subject_to='fsaverage',subjects_dir=fs_dir)
+    morph = mne.compute_source_morph(stc,subject_from=fs_subject,subject_to='fsaverage',subjects_dir=fs_dir)
 
     # Save the morphed time series; MNE appends -lh.stc and -rh.stc.
     stc_morph = morph.apply(stc)
@@ -192,7 +207,7 @@ try:
     # Loop through each frequency band
     for i, (band, power) in enumerate(band_powers.items()):
         # Morph the band power to fsaverage
-        stc_band_morph = stc_per_band(morph, power, stc, subject)
+        stc_band_morph = stc_per_band(morph, power, stc, fs_subject)
 
         # Initialize band power matrix on the first iteration
         if band_powers_morph is None:
@@ -212,7 +227,7 @@ try:
     gc.collect()
 
     # Create and save spectrally resolved stc
-    stc_psd_morph = stc_per_band(morph, psd_normalized, stc, subject)
+    stc_psd_morph = stc_per_band(morph, psd_normalized, stc, fs_subject)
     stc_psd_morph.tmin = 0
     stc_psd_morph.tstep = .25
     stc_psd_morph.save(os.path.join(output_dir, f"{output_basename}_psd_fsaverage"),ftype="stc",overwrite=True)

@@ -32,6 +32,8 @@ def parse_args(argv=None):
     p.add_argument("-oAEC", "--oAEC", action="store_true", help="Compute oAEC for both atlases.")
     p.add_argument("-wPLI", "--wPLI", action="store_true", help="Compute debiased wPLI for both atlases.")
     p.add_argument("-PLV", "--PLV", action="store_true", help="Compute PLV for both atlases.")
+    p.add_argument("--json", action="store_true",
+                   help="Resolve the FreeSurfer subject from IntendedFor in the MEG coordsystem JSON.")
     args = p.parse_args(argv)
     args.subject_raw = args.subject
     # Accept a combined identifier or the MEG filename/path containing it.
@@ -185,6 +187,19 @@ def print_memory(label):
 #%% Directories
 fs_dir = os.path.join(data_dir,'MRI','freesurfer') # Path to FreeSurfer subjects
 meg_dir = os.path.join(data_dir,'MEG',subject,session,'meg') # Path to MEG data
+json_path = meg_dir
+if args.json:
+    head_coordinate_file = os.path.join(json_path, f"{subject}_{session}_coordsystem.json")
+    head_coordinates = load_json(head_coordinate_file)
+    intended = strip_bids_prefix(head_coordinates["IntendedFor"])
+    mri_basename = strip_nii_suffix(os.path.basename(intended))
+    fs_subject = extract_bids_id(mri_basename)
+    if not fs_subject:
+        raise ValueError(f"Could not extract a FreeSurfer subject from {intended!r}")
+else:
+    fs_subject = subject
+print(f"MEG subject: {subject}; FreeSurfer subject: {fs_subject}", flush=True)
+
 log_dir = os.path.join(data_dir, 'logfiles')
 derivatives_dir = os.path.join(data_dir, 'derivatives', subject, session, inv_method)
 output_basename = f"{subject}_{session}_task-rest_{run}_meg"
@@ -208,11 +223,11 @@ required_MRIannot = ['lh.Schaefer2018_200Parcels_17Networks_order.annot',
                      'rh.aparc.annot']
 
 # Check if all required files exist
-missing_MRIfiles = [ file for file in required_MRIfiles if not os.path.exists(os.path.join(fs_dir, subject, 'surf', file))]
+missing_MRIfiles = [ file for file in required_MRIfiles if not os.path.exists(os.path.join(fs_dir, fs_subject, 'surf', file))]
 missing_MEGfiles = [file for file in required_MEGfiles if not os.path.isfile(file)]
 if not missing_MRIfiles and not missing_MEGfiles:
-    ensure_annotations(fs_dir, subject, required_MRIannot)
-missing_MRIannot = [ file for file in required_MRIannot if not os.path.exists(os.path.join(fs_dir, subject, 'label', file))]
+    ensure_annotations(fs_dir, fs_subject, required_MRIannot)
+missing_MRIannot = [ file for file in required_MRIannot if not os.path.exists(os.path.join(fs_dir, fs_subject, 'label', file))]
 
 
 #%% Immutable Variables
@@ -255,7 +270,7 @@ try:
     stc = mne.read_source_estimate(stc_path)
 
 
-    stc.subject = subject
+    stc.subject = fs_subject
     src = mne.read_source_spaces(src_path)
     sfreq = stc.sfreq
 
@@ -263,7 +278,7 @@ try:
     _, _, psd_normalized, band_powers = PSD_per_vertex_parallel(stc, bands)
     stc_psd = mne.SourceEstimate(
         data=psd_normalized, vertices=stc.vertices,
-        tmin=0, tstep=0.25, subject=subject,
+        tmin=0, tstep=0.25, subject=fs_subject,
     )
     del psd_normalized, band_powers
 
@@ -278,7 +293,7 @@ try:
         output_dir = os.path.join(derivatives_dir, atlas_directory, run)
         os.makedirs(output_dir, exist_ok=True)
         print(f"Parcellating {atlas_name}", flush=True)
-        labels = mne.read_labels_from_annot(subject, parc=parc, subjects_dir=fs_dir)
+        labels = mne.read_labels_from_annot(fs_subject, parc=parc, subjects_dir=fs_dir)
         # Exclude non-cortical annotation entries from the parcel matrices.
         labels = [label for label in labels
                   if not any(token in label.name.lower()
