@@ -115,8 +115,10 @@ from mne_nanotools.io_handlers import *
 
 faulthandler.enable()
 def print_memory(label):
-    mem_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    print(f"[MEMORY] {label}: peak RSS = {mem_kb / 1024**2:.2f} GB")
+    peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    # macOS reports bytes; Linux reports KiB. This is the parent-process peak.
+    peak_gib = peak_rss / (1024**3 if sys.platform == "darwin" else 1024**2)
+    print(f"[MEMORY] {label}: peak RSS = {peak_gib:.2f} GiB", flush=True)
 
 # Set number of cores for parallel processing (must be done before running any linear algebra functions)
 #num_cpu = '16'
@@ -182,20 +184,38 @@ with open(os.path.join(log_dir,"missing_files_log.txt"), "a") as log_file:  # "a
         log_file.write(message + "\n")  # Add a newline for each entry
         raise ValueError(message)
 
+
+# Define frequency bands
+bands = {
+    'delta': (1, 4),
+    'theta': (4, 7),
+    'alpha': (8, 12),
+    'beta': (15, 29),
+    'g_low': (30, 59),
+    'g_high': (60, 90)
+}
 #%% Main steps
 try:
     # Load the SourceEstimate for the subject
     stc = mne.read_source_estimate(stc_path)
     stc.subject = fs_subject
     print_memory("after loading STC")
+    print(
+        f"[STC] shape={stc.data.shape}, dtype={stc.data.dtype}, "
+        f"data size={stc.data.nbytes / 1024**3:.2f} GiB",
+        flush=True,
+    )
     # Compute the morph to fsaverage
     morph = mne.compute_source_morph(stc,subject_from=fs_subject,subject_to='fsaverage',subjects_dir=fs_dir)
+    print_memory("after computing morph; before applying morph to time series")
 
     # Save the morphed time series; MNE appends -lh.stc and -rh.stc.
     stc_morph = morph.apply(stc)
+    print_memory("after applying morph; before saving morphed time series")
     stc_morph.save(os.path.join(output_dir, f"{output_basename}_stc_fsaverage"),ftype="stc",overwrite=True)
     del stc_morph
     gc.collect()
+    print_memory("after saving morphed time series; before PSD computation")
 
     # Compute normalized PSD and band powers
     _, _, psd_normalized, band_powers = PSD_per_vertex_parallel(stc,bands)
@@ -228,6 +248,7 @@ try:
 
     # Create and save spectrally resolved stc
     stc_psd_morph = stc_per_band(morph, psd_normalized, stc, fs_subject)
+    print_memory("after morphing PSD; before saving PSD")
     stc_psd_morph.tmin = 0
     stc_psd_morph.tstep = .25
     stc_psd_morph.save(os.path.join(output_dir, f"{output_basename}_psd_fsaverage"),ftype="stc",overwrite=True)
