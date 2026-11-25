@@ -32,8 +32,14 @@ def parse_args(argv=None):
     p.add_argument("-oAEC", "--oAEC", action="store_true", help="Compute oAEC for both atlases.")
     p.add_argument("-wPLI", "--wPLI", action="store_true", help="Compute debiased wPLI for both atlases.")
     p.add_argument("-PLV", "--PLV", action="store_true", help="Compute PLV for both atlases.")
-    p.add_argument("--json", action="store_true",
+    p.add_argument("--json_coordsystem", action="store_true",
                    help="Resolve the FreeSurfer subject from IntendedFor in the MEG coordsystem JSON.")
+    p.add_argument("--bad_seg", default=None, metavar="json|CSV_PATH",
+                    help=("Use 'json' to find the STC's _metadata.json, or provide a CSV "
+                    "with start_sample and stop_sample columns relative to the STC. "
+                    "Omit to disable bad-window rejection."))
+    p.add_argument("--PSD_win_len", type=float, default=4.0,
+                    help="Window length in seconds for PSD computation (default: 4.0).")
     args = p.parse_args(argv)
     args.subject_raw = args.subject
     # Accept a combined identifier or the MEG filename/path containing it.
@@ -66,7 +72,9 @@ def find_stc_path(stc_dir, subject, session, run, inv_method):
     entities = {subject, session, "task-rest", run}
     matches = [
         path for path in sorted(Path(stc_dir).glob(f"*_{inv_method}_stc-lh.stc"))
-        if entities.issubset(path.name.split("_"))
+        if not path.name.startswith(".")
+        and path.is_file()
+        and entities.issubset(path.name.split("_"))
     ]
     if not matches:
         raise FileNotFoundError(
@@ -188,7 +196,7 @@ def print_memory(label):
 fs_dir = os.path.join(data_dir,'MRI','freesurfer') # Path to FreeSurfer subjects
 meg_dir = os.path.join(data_dir,'MEG',subject,session,'meg') # Path to MEG data
 json_path = meg_dir
-if args.json:
+if args.json_coordsystem:
     head_coordinate_file = os.path.join(json_path, f"{subject}_{session}_coordsystem.json")
     head_coordinates = load_json(head_coordinate_file)
     intended = strip_bids_prefix(head_coordinates["IntendedFor"])
@@ -275,7 +283,8 @@ try:
     sfreq = stc.sfreq
 
     # Compute vertex-wise PSD once and reuse it for both atlases.
-    _, _, psd_normalized, band_powers = PSD_per_vertex_parallel(stc, bands)
+    bad_intervals = resolve_bad_segments(args.bad_seg, stc_path)
+    _, _, psd_normalized, band_powers = PSD_per_vertex(stc, bands, window_length=args.PSD_win_len, bad_intervals=bad_intervals)
     stc_psd = mne.SourceEstimate(
         data=psd_normalized, vertices=stc.vertices,
         tmin=0, tstep=0.25, subject=fs_subject,
@@ -320,7 +329,7 @@ try:
                 continue
             print(f"Computing {metric} for {atlas_name}", flush=True)
             if metric == "oAEC":
-                correlations = compute_band_oAEC(parc_ts_pca, sfreq, bands)
+                correlations = compute_band_oAEC(parc_ts_pca, sfreq, bands, bad_intervals=bad_intervals)
             elif metric == "wPLI":
                 correlations = compute_band_wPLI(
                     parc_ts_pca, sfreq, bands, n_jobs=num_cpu, debiased=True,
@@ -355,3 +364,4 @@ except Exception as e:
     sys.stdout.flush()
     sys.stderr.flush()
     raise
+

@@ -22,23 +22,29 @@ from pathlib import Path
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description="Morph a subject's MEG source estimates to fsaverage.")
-    p.add_argument("--subject", required=True, help="Subject ID or combined subject/session/run name.")
-    p.add_argument("--data-dir", required=True,
+    p.add_argument("--subject_id", required=True, help="Subject ID or combined subject/session/run name.")
+    p.add_argument("--root-dir", required=True,
                    type=lambda path: os.path.abspath(os.path.expanduser(path)),
                    help="Dataset root containing MEG, MRI, and derivatives.")
     p.add_argument("--session", help="Session label, e.g. 1 or ses-1 (default: ses-1).")
     p.add_argument("--run", help="Run label, e.g. 1 or run-1; inferred from the name if present.")
     p.add_argument("--inv_method", default="beamformer",
                    choices=["MNE", "dSPM", "sLORETA", "beamformer"], help="Inverse method.")
-    p.add_argument("--json", action="store_true",
+    p.add_argument("--json_coordsystem", action="store_true",
                    help="Resolve the FreeSurfer subject from IntendedFor in the MEG coordsystem JSON.")
+    p.add_argument("--bad_seg", default=None, metavar="json|CSV_PATH",
+                   help=("Use 'json' to find the STC's _metadata.json, or provide a CSV "
+                    "with start_sample and stop_sample columns relative to the STC. "
+                    "Omit to disable bad-window rejection."))
+    p.add_argument("--PSD_win_len", type=float, default=4.0,
+                   help="Window length in seconds for PSD computation (default: 4.0).")
     args = p.parse_args(argv)
-    args.subject_raw = args.subject
+    args.subject_raw = args.subject_id
     # Accept a combined identifier or the MEG filename/path containing it.
     name = Path(args.subject_raw).name
     subject_match = re.match(r"(sub-[^_]+)", name)
     if not subject_match:
-        p.error("--subject must start with a sub- identifier.")
+        p.error("--subject_id must start with a sub- identifier.")
     args.subject = subject_match.group(1)
     for entity, prefix in (("session", "ses-"), ("run", "run-")):
         match = re.search(rf"(?:^|_)({prefix}[^_]+)", name)
@@ -54,8 +60,8 @@ def parse_args(argv=None):
     args.session = args.session or "ses-1"
     if not args.run:
         p.error("Provide --run or include run-<label> in --subject.")
-    if not os.path.isdir(args.data_dir):
-        p.error(f"Data directory does not exist: {args.data_dir}")
+    if not os.path.isdir(args.root_dir):
+        p.error(f"Root directory does not exist: {args.root_dir}")
     return args
 
 
@@ -64,7 +70,9 @@ def find_stc_path(stc_dir, subject, session, run, inv_method):
     entities = {subject, session, "task-rest", run}
     matches = [
         path for path in sorted(Path(stc_dir).glob(f"*_{inv_method}_stc-lh.stc"))
-        if entities.issubset(path.name.split("_"))
+        if not path.name.startswith(".")
+        and path.is_file()
+        and entities.issubset(path.name.split("_"))
     ]
     if not matches:
         raise FileNotFoundError(
@@ -79,7 +87,7 @@ def find_stc_path(stc_dir, subject, session, run, inv_method):
 args = parse_args()
 subject_raw = args.subject_raw
 subject = args.subject
-data_dir = args.data_dir
+root_dir = args.root_dir
 session = args.session
 inv_method = args.inv_method
 run = args.run
@@ -114,6 +122,7 @@ from mne_nanotools.io_handlers import *
 
 
 faulthandler.enable()
+
 def print_memory(label):
     peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     # macOS reports bytes; Linux reports KiB. This is the parent-process peak.
@@ -128,11 +137,11 @@ def print_memory(label):
 
 
 #%% Directories
-fs_dir = os.path.join(data_dir,'MRI','freesurfer') # Path to FreeSurfer subjects
-meg_dir = os.path.join(data_dir,'MEG',subject,session,'meg') # Path to MEG data
-json_path = meg_dir
-if args.json:
-    head_coordinate_file = os.path.join(json_path, f"{subject}_{session}_coordsystem.json")
+fs_dir = os.path.join(root_dir,'MRI','freesurfer') # Path to FreeSurfer subjects
+meg_dir = os.path.join(root_dir,'MEG',subject,session,'meg') # Path to MEG data
+json_coordsystem_path = meg_dir
+if args.json_coordsystem:
+    head_coordinate_file = os.path.join(json_coordsystem_path, f"{subject}_{session}_coordsystem.json")
     head_coordinates = load_json(head_coordinate_file)
     intended = strip_bids_prefix(head_coordinates["IntendedFor"])
     mri_basename = strip_nii_suffix(os.path.basename(intended))
@@ -143,11 +152,11 @@ else:
     fs_subject = subject
 print(f"MEG subject: {subject}; FreeSurfer subject: {fs_subject}", flush=True)
 
-log_dir = os.path.join(data_dir, 'logfiles')
-output_dir = os.path.join(data_dir, 'derivatives', subject, session, inv_method, 'fsaverage-morphed_stc')
+log_dir = os.path.join(root_dir, 'logfiles')
+output_dir = os.path.join(root_dir, 'derivatives', subject, session, inv_method, 'fsaverage-morphed_stc')
 output_dir = os.path.join(output_dir, run)
 output_basename = f"{subject}_{session}_task-rest_{run}_meg"
-stc_dir = os.path.join(data_dir, 'derivatives', subject, session, inv_method, 'stc')
+stc_dir = os.path.join(root_dir, 'derivatives', subject, session, inv_method, 'stc')
 stc_path = find_stc_path(stc_dir, subject, session, run, inv_method)
 
 os.makedirs(output_dir, exist_ok=True)
@@ -218,7 +227,8 @@ try:
     print_memory("after saving morphed time series; before PSD computation")
 
     # Compute normalized PSD and band powers
-    _, _, psd_normalized, band_powers = PSD_per_vertex_parallel(stc,bands)
+    bad_intervals = resolve_bad_segments(args.bad_seg, stc_path)
+    _, _, psd_normalized, band_powers = PSD_per_vertex(stc, bands, window_length=args.PSD_win_len, bad_intervals=bad_intervals)
     print_memory("after PSD_per_vertex")
 
     # Initialize storage for morphed band powers
@@ -265,3 +275,4 @@ except Exception as e:
     sys.stdout.flush()
     sys.stderr.flush()
     raise
+

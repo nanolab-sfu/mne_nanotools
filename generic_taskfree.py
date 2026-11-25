@@ -15,6 +15,7 @@ Example:
 """
 
 import os
+import json
 import argparse
 from pathlib import Path
 from typing import Literal
@@ -37,6 +38,33 @@ import sys
 sys.path.append(os.path.expanduser("~"))
 from mne_nanotools import preprocessing, postprocessing, io_handlers
 from mne_nanotools.artifact_montages import prepare_artifact_reference
+
+# Local file discovery helpers (supports MNE-style + BIDS-style + suffixed variants)
+# ----------------------------------------------------------
+
+def _save_stc_metadata(stc_path, annot_path, raw, stc, inv_method, start, stop):
+    """Save annotation alignment metadata beside a newly computed STC."""
+    metadata_path = Path(str(stc_path) + "_metadata.json")
+    metadata = {
+        "schema_version": 1,
+        "stc_base": Path(stc_path).name,
+        "inverse_method": inv_method,
+        # Resolve this relative path from the directory containing the JSON.
+        "annotations_file": os.path.relpath(annot_path, metadata_path.parent),
+        "raw_first_time_s": float(raw.first_time),
+        "raw_sfreq": float(raw.info["sfreq"]),
+        # Raw-relative sample indices; stop is exclusive.
+        "source_start_sample": int(start),
+        "source_stop_sample": int(start) + int(stc.data.shape[-1]),
+        "source_requested_stop_sample": int(stop),
+        "stc_sfreq": float(1.0 / stc.tstep),
+        "stc_tmin_s": float(stc.tmin),
+        "stc_n_times": int(stc.data.shape[-1]),
+    }
+    with metadata_path.open("w", encoding="utf-8") as fid:
+        json.dump(metadata, fid, indent=2, allow_nan=False)
+        fid.write("\n")
+    print(f"→ STC metadata saved at: {metadata_path}")
 
 # Local file discovery helpers (supports MNE-style + BIDS-style + suffixed variants)
 # ----------------------------------------------------------
@@ -559,6 +587,8 @@ def preprocess_subject(
     h_freq: float = 200.0,
     line_freqs: tuple = (60, 120, 180),
     downsample: int = 500,
+    MAD_window_length: float = 4.0,
+    PSD_win_length: float = 4.0,
     crop_tmin: tuple = (10, 10),
     crop_tmax: tuple = (110, 250),
     ecg_ch: str = "ECG003",
@@ -1024,7 +1054,7 @@ def preprocess_subject(
         print(f"→ Downsampling to {downsample} Hz")
         raw.resample(downsample)
         raw_erm.resample(downsample)
-        fig = raw.compute_psd(fmax=180,
+        fig = raw.compute_psd(fmax=np.floor(downsample / 2),
             method="welch",
             n_fft=int(4 * raw.info["sfreq"]),     # 4-second window
             n_overlap=int(2 * raw.info["sfreq"]),     # 50% overlap (2-second)
@@ -1342,7 +1372,7 @@ def preprocess_subject(
     # --- Amplitude and gradient thresholds ----
     try:
         print("→ Amplitude and gradient thresholding")
-        n_windows, bad_windows, metrics, thresholds, bad_times = preprocessing.detect_bad_mad_grads_mags(raw, win_length=1.0, n_mad=3,)
+        n_windows, bad_windows, metrics, thresholds, bad_times = preprocessing.detect_bad_mad_grads_mags(raw, win_length=MAD_window_length, n_mad=3,)
 
         fig = preprocessing.plot_mad_qc(n_windows, bad_windows, metrics, thresholds, subject_name=subject)
         report.add_figure(fig, title='MAD amplitude/gradient QC', caption='P2P + gradient thresholds')
@@ -1355,7 +1385,12 @@ def preprocess_subject(
         raw.set_annotations(ann + raw.annotations)
         raw.load_data() # Ensure BAD segments are masked
 
-        fig = raw.compute_psd(fmax=180, verbose=False).plot(picks="data", exclude="bads", amplitude=True, show=False)
+        fig = raw.compute_psd(fmax=np.floor(downsample / 2),
+                    method="welch",
+                    n_fft=int(4 * raw.info["sfreq"]),     # 4-second window
+                    n_overlap=int(2 * raw.info["sfreq"]),     # 50% overlap (2-second)
+                    average='mean',
+                    window='hann').plot(picks="data", exclude="bads", amplitude=True, show=False)
 
         report.add_figure(fig, title="PSD after MAD")
 
@@ -1402,8 +1437,14 @@ def preprocess_subject(
     raw.save(filt_path, overwrite=True)
     raw_erm.save(filt_erm_path, overwrite=True)
 
+    # Save all annotations, including BAD_mad, for independent loading later.
+    # Use the input recording stem, consistent with STC naming.
+    annot_path = str(Path(path2raw).with_suffix("")) + "_annot.fif"
+    raw.annotations.save(annot_path, overwrite=True)
+
     print(f"→ Filtered/projected raw saved at: {filt_path}")
     print(f"→ Filtered/projected ERM saved at: {filt_erm_path}")
+    print(f"→ Annotations saved at: {annot_path}")
 
 
     # ======================================================
@@ -1583,6 +1624,10 @@ def preprocess_subject(
 
                 try:
                     stc.save(stc_path, overwrite=True)
+                    _save_stc_metadata(
+                        stc_path, annot_path, raw, stc, inv_method,
+                        start=0, stop=raw.n_times,
+                    )
                     print(f"→ STC saved at {stc_path}")
                 except Exception as e:
                     print(f"⚠️ Could not save STC: {e}")
@@ -1651,6 +1696,10 @@ def preprocess_subject(
 
                 try:
                     stc.save(stc_path, overwrite=True)
+                    _save_stc_metadata(
+                        stc_path, annot_path, raw, stc, inv_method,
+                        start=start, stop=stop,
+                    )
                     print(f"→ STC saved at {stc_path}")
                 except Exception as e:
                     print(f"⚠️ Could not save STC: {e}")
@@ -1673,8 +1722,24 @@ def preprocess_subject(
     #       BANDWISE SOURCE PSDs
     # ======================================================
     if stc is not None:
-        print("→ Computing vertex-wise PSDs (parallel)...")
-        psd_all, freqs, psd_normalized, band_powers = postprocessing.PSD_per_vertex_parallel(stc,bands)
+        print("→ Computing vertex-wise PSDs...")
+        annot = raw.annotations
+        bad_annotations = annot[annot.description == "BAD_mad"]
+        fs = 1.0 / stc.tstep
+        # apply_lcmv_raw stores raw.times[start] in stc.tmin. Using the
+        # STC also preserves this offset when loading an existing estimate.
+        source_start_s = float(stc.tmin) if inv_method == "beamformer" else 0.0
+        
+        bad_starts_s = bad_annotations.onset - raw.first_time - source_start_s
+        bad_intervals = np.column_stack((
+            np.floor(bad_starts_s * fs),
+            np.ceil((bad_starts_s + bad_annotations.duration) * fs),
+        )).astype(int)
+        # Keep only the portions of annotations within this STC crop.
+        bad_intervals = np.clip(bad_intervals, 0, stc.data.shape[-1])
+        bad_intervals = bad_intervals[bad_intervals[:, 1] > bad_intervals[:, 0]]
+        
+        psd_all, freqs, psd_normalized, band_powers = postprocessing.PSD_per_vertex(stc,bands, win_length=PSD_win_length, bad_intervals=bad_intervals)
         #%% Figure hyperparameters
         fig, axes = plt.subplots(6, 3, figsize=(10, 10))  # 5 filas, 2 columnas
         axes = axes.reshape(6, 3)  # Asegurar que tenga forma (5, 2) para indexación clara
@@ -1790,6 +1855,8 @@ def _parse_args():
     p.add_argument("--h_freq", type=float, default=200.0)
     p.add_argument("--line_freqs", type=float, nargs="*", default=[60, 120, 180])
     p.add_argument("--downsample", type=int, default=500)
+    p.add_argument("--MAD_window_length", type=float, default=1.0)
+    p.add_argument("--PSD_win_len", type=float, default=4.0)
     p.add_argument("--crop_tmin", type=float, nargs=2, default=[10.0, 10.0])
     p.add_argument("--crop_tmax", type=float, nargs=2, default=[110.0, 250.0])
     p.add_argument("--ecg_ch", type=str, default="ECG003",
@@ -1902,6 +1969,8 @@ if __name__ == "__main__":
         h_freq=args.h_freq,
         line_freqs=tuple(args.line_freqs) if args.line_freqs else (),
         downsample=args.downsample,
+        MAD_window_length=args.MAD_window_length,
+        PSD_win_len=args.PSD_win_len,
         crop_tmin=tuple(args.crop_tmin),
         crop_tmax=tuple(args.crop_tmax),
         ecg_ch=args.ecg_ch,

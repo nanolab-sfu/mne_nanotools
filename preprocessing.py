@@ -304,7 +304,7 @@ def read_montage(file_path):
 
 
 
-def detect_bad_mad_grads_mags(raw, win_length=1.0, n_mad=3, abs_gradient=True, manual_thresholds=None, picks=None,):
+def detect_bad_mad_grads_mags(raw, win_length=4.0, n_mad=3, abs_gradient=True, manual_thresholds=None, picks=None,):
     """
     Detect bad windows using MAD thresholds, automatically adapting to
     the presence of MEG grad/mag channels. Works with CTF (grad only),
