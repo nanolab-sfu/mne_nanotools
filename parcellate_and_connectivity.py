@@ -38,7 +38,7 @@ def parse_args(argv=None):
                     help=("Use 'json' to find the STC's _metadata.json, or provide a CSV "
                     "with start_sample and stop_sample columns relative to the STC. "
                     "Omit to disable bad-window rejection."))
-    p.add_argument("--PSD_win_len", type=float, default=4.0,
+    p.add_argument("--PSD_win_length", type=float, default=4.0,
                     help="Window length in seconds for PSD computation (default: 4.0).")
     args = p.parse_args(argv)
     args.subject_raw = args.subject
@@ -284,7 +284,7 @@ try:
 
     # Compute vertex-wise PSD once and reuse it for both atlases.
     bad_intervals = resolve_bad_segments(args.bad_seg, stc_path)
-    _, _, psd_normalized, band_powers = PSD_per_vertex(stc, bands, window_length=args.PSD_win_len, bad_intervals=bad_intervals)
+    _, _, psd_normalized, band_powers = PSD_per_vertex(stc, bands, window_length=args.PSD_win_length, bad_intervals=bad_intervals)
     stc_psd = mne.SourceEstimate(
         data=psd_normalized, vertices=stc.vertices,
         tmin=0, tstep=0.25, subject=fs_subject,
