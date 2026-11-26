@@ -1739,7 +1739,7 @@ def preprocess_subject(
         bad_intervals = np.clip(bad_intervals, 0, stc.data.shape[-1])
         bad_intervals = bad_intervals[bad_intervals[:, 1] > bad_intervals[:, 0]]
         
-        psd_all, freqs, psd_normalized, band_powers = postprocessing.PSD_per_vertex(stc,bands, win_length=PSD_win_length, bad_intervals=bad_intervals)
+        psd_all, freqs, psd_normalized, band_powers = postprocessing.PSD_per_vertex(stc,bands, window_length=PSD_win_length, bad_intervals=bad_intervals)
         #%% Figure hyperparameters
         fig, axes = plt.subplots(6, 3, figsize=(10, 10))  # 5 filas, 2 columnas
         axes = axes.reshape(6, 3)  # Asegurar que tenga forma (5, 2) para indexación clara
