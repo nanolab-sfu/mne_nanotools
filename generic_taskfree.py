@@ -1856,7 +1856,7 @@ def _parse_args():
     p.add_argument("--line_freqs", type=float, nargs="*", default=[60, 120, 180])
     p.add_argument("--downsample", type=int, default=500)
     p.add_argument("--MAD_window_length", type=float, default=1.0)
-    p.add_argument("--PSD_win_len", type=float, default=4.0)
+    p.add_argument("--PSD_win_length", type=float, default=4.0)
     p.add_argument("--crop_tmin", type=float, nargs=2, default=[10.0, 10.0])
     p.add_argument("--crop_tmax", type=float, nargs=2, default=[110.0, 250.0])
     p.add_argument("--ecg_ch", type=str, default="ECG003",
@@ -1970,7 +1970,7 @@ if __name__ == "__main__":
         line_freqs=tuple(args.line_freqs) if args.line_freqs else (),
         downsample=args.downsample,
         MAD_window_length=args.MAD_window_length,
-        PSD_win_len=args.PSD_win_len,
+        PSD_win_length=args.PSD_win_length,
         crop_tmin=tuple(args.crop_tmin),
         crop_tmax=tuple(args.crop_tmax),
         ecg_ch=args.ecg_ch,
