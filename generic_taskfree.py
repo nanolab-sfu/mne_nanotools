@@ -1383,15 +1383,32 @@ def preprocess_subject(
         orig_time = raw.info["meas_date"]
         ann = mne.Annotations(onset=onset, duration=duration, description=labels, orig_time=orig_time)
         raw.set_annotations(ann + raw.annotations)
-        raw.load_data() # Ensure BAD segments are masked
+        raw.load_data()
 
-        fig = raw.compute_psd(fmax=np.floor(downsample / 2),
-                    method="welch",
-                    n_fft=int(4 * raw.info["sfreq"]), 
-                    n_per_seg=int(4 * raw.info["sfreq"]),    # 4-second window
-                    n_overlap=int(2 * raw.info["sfreq"]),     # 50% overlap (2-second)
-                    average='mean',
-                    window='hann').plot(picks="data", exclude="bads", amplitude=True, show=False)
+        # Align BAD* annotations to sample indices in the original sensor data.
+        annot = raw.annotations
+        bad_annotations = annot[np.char.startswith(np.char.lower(annot.description), "bad")]
+        fs = raw.info["sfreq"]
+        bad_starts_s = bad_annotations.onset - raw.first_time
+        bad_intervals = np.column_stack((
+            np.floor(bad_starts_s * fs),
+            np.ceil((bad_starts_s + bad_annotations.duration) * fs),
+        )).astype(int)
+
+        picks = mne.pick_types(raw.info, meg=True, eeg=True, ref_meg=False, exclude="bads")
+        data = raw.get_data(picks=picks)
+        # Average only complete windows that do not overlap bad intervals.
+        freqs, psd = postprocessing.welch(
+            data,
+            fs=fs,
+            window="hann",
+            nperseg=int(round(fs * PSD_win_length)),
+            noverlap=int(round(fs * PSD_win_length)) // 2,
+            scaling="density",
+            bad_intervals=bad_intervals,
+        )
+        spectrum = mne.time_frequency.SpectrumArray(psd, mne.pick_info(raw.info, picks), freqs)
+        fig = spectrum.plot(picks="data", exclude="bads", amplitude=True, show=False)
 
         report.add_figure(fig, title="PSD after MAD")
 
@@ -1883,9 +1900,10 @@ def _parse_args():
     p.add_argument("--raw_ssp_band", type=parse_ranges, default=None, required=False, help="Frequency ranges for generic SSP as start-end pairs, e.g. 42-45,50-53")
     p.add_argument("--bcglike_ssp", action="store_true", help="Apply ssp for ballistocardiographic-like events.")
     for kind in ("eog", "ecg", "erm", "raw", "bcglike"):
-        p.add_argument(f"--num_proj_{kind}", type=int, nargs="+", choices=(0, 1, 2, 3),
-                       default=[1], help="PCA indices per MEG type, not a count: "
-                       "3 selects only PCA 3; 1 3 selects PCA 1 and 3; 0 selects none.")
+        p.add_argument(f"--num_proj_{kind}", type=str, nargs="+",
+                       default=["1"], help="PCA indices (0-3) per MEG type, not a count; "
+                       "separate with spaces or commas: 3 selects only PCA 3; "
+                       "1 3 or 1,3 selects PCA 1 and 3; 0 selects none.")
 
     # Additional bad channels can be passed as spaces, commas, or both.
     # Examples:
@@ -1898,9 +1916,18 @@ def _parse_args():
     p.add_argument("--overwrite", action = "store_true", help="If called, it will overwrite all the *_tsss.fif, *.stc and report files, allong any other output.")
     args = p.parse_args()
     for kind in ("eog", "ecg", "erm", "raw", "bcglike"):
-        indices = getattr(args, f"num_proj_{kind}")
+        flag = f"num_proj_{kind}"
+        values = getattr(args, flag)
+        tokens = [token for value in values for token in re.split(r"[,\s]+", value.strip()) if token]
+        try:
+            indices = [int(token) for token in tokens]
+        except ValueError:
+            p.error(f"--{flag}: expected integer PCA indices separated by spaces or commas")
+        if not indices or any(index not in (0, 1, 2, 3) for index in indices):
+            p.error(f"--{flag}: PCA indices must be 0, 1, 2 or 3")
         if 0 in indices and len(indices) != 1:
-            p.error(f"--num_proj_{kind}: 0 must be used alone")
+            p.error(f"--{flag}: 0 must be used alone")
+        setattr(args, flag, indices)
     return args
 
 
