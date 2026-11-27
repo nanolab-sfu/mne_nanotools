@@ -1407,8 +1407,11 @@ def preprocess_subject(
             scaling="density",
             bad_intervals=bad_intervals,
         )
+        mask = freqs <= 150
+        freqs = freqs[mask]
+        psd = psd[:, mask]
         spectrum = mne.time_frequency.SpectrumArray(psd, mne.pick_info(raw.info, picks), freqs)
-        fig = spectrum.plot(picks="data", exclude="bads", amplitude=True, fmax=150, show=False)
+        fig = spectrum.plot(picks="data", exclude="bads", amplitude=True, show=False)
 
         report.add_figure(fig, title="PSD after MAD")
 
@@ -2049,4 +2052,3 @@ if __name__ == "__main__":
 
     raw_stem = Path(file_path).stem
     save_hyperparameters(report_dir=report_dir, args=args, raw_stem=raw_stem)
-    
