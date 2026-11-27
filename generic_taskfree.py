@@ -998,7 +998,7 @@ def preprocess_subject(
             psd_title = "Input PSD — already Maxwell/SSS/tSSS processed"
 
         fig = raw.compute_psd(
-            fmax=180,
+            fmax=150,
             method="welch",
             picks=["meg"],
             n_fft=int(4 * raw.info["sfreq"]),
@@ -1054,14 +1054,14 @@ def preprocess_subject(
         print(f"→ Downsampling to {downsample} Hz")
         raw.resample(downsample)
         raw_erm.resample(downsample)
-        fig = raw.compute_psd(fmax=np.floor(downsample / 2),
+        fig = raw.compute_psd(fmax=150,
             method="welch",
             n_fft=int(4 * raw.info["sfreq"]),     # 4-second window
             n_overlap=int(2 * raw.info["sfreq"]),     # 50% overlap (2-second)
             average='mean',
             window='hann').plot(picks="data", exclude="bads", amplitude=True, show=False)
 
-        report.add_figure(fig, title=f"PSD after bandpass filter {l_freq}-{h_freq} + downsample ({downsample} Hz)")
+    report.add_figure(fig, title=f"PSD after bandpass filter {l_freq}-{h_freq} + downsample ({downsample} Hz)")
 
     # ---- Additional bad channels ----
     if additional_bads:
@@ -1408,7 +1408,7 @@ def preprocess_subject(
             bad_intervals=bad_intervals,
         )
         spectrum = mne.time_frequency.SpectrumArray(psd, mne.pick_info(raw.info, picks), freqs)
-        fig = spectrum.plot(picks="data", exclude="bads", amplitude=True, show=False)
+        fig = spectrum.plot(picks="data", exclude="bads", amplitude=True, fmax=150, show=False)
 
         report.add_figure(fig, title="PSD after MAD")
 
@@ -1873,7 +1873,7 @@ def _parse_args():
     p.add_argument("--h_freq", type=float, default=200.0)
     p.add_argument("--line_freqs", type=float, nargs="*", default=[60, 120, 180])
     p.add_argument("--downsample", type=int, default=500)
-    p.add_argument("--MAD_window_length", type=float, default=1.0)
+    p.add_argument("--MAD_window_length", type=float, default=4.0)
     p.add_argument("--PSD_win_length", type=float, default=4.0)
     p.add_argument("--crop_tmin", type=float, nargs=2, default=[10.0, 10.0])
     p.add_argument("--crop_tmax", type=float, nargs=2, default=[110.0, 250.0])
@@ -2049,3 +2049,4 @@ if __name__ == "__main__":
 
     raw_stem = Path(file_path).stem
     save_hyperparameters(report_dir=report_dir, args=args, raw_stem=raw_stem)
+    
