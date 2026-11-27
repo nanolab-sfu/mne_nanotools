@@ -1387,7 +1387,8 @@ def preprocess_subject(
 
         fig = raw.compute_psd(fmax=np.floor(downsample / 2),
                     method="welch",
-                    n_fft=int(4 * raw.info["sfreq"]),     # 4-second window
+                    n_fft=int(4 * raw.info["sfreq"]), 
+                    n_per_seg=int(4 * raw.info["sfreq"]),    # 4-second window
                     n_overlap=int(2 * raw.info["sfreq"]),     # 50% overlap (2-second)
                     average='mean',
                     window='hann').plot(picks="data", exclude="bads", amplitude=True, show=False)
